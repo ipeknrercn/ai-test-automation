@@ -1,0 +1,116 @@
+// backend/prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+  previewFeatures = []
+}
+
+// TESTLER
+model Test {
+  id          Int       @id @default(autoincrement())
+  testName    String
+  description String?
+  userPrompt  String    @db.Text
+  targetUrl   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  testRuns       TestRun[]
+  promptVersions PromptVersion[]
+  
+  @@map("tests")
+}
+
+// TEST ÇALIŞTIRMALARI
+model TestRun {
+  id          Int       @id @default(autoincrement())
+  testId      Int
+  status      String
+  startTime   DateTime
+  endTime     DateTime?
+  durationMs  Int?
+  errorMsg    String?   @db.Text
+  browser     String    @default("chromium")
+  
+  test        Test      @relation(fields: [testId], references: [id], onDelete: Cascade)
+  steps       TestStep[]
+  
+  createdAt   DateTime  @default(now())
+  
+  @@index([testId])
+  @@index([status])
+  @@map("test_runs")
+}
+
+// TEST ADIMLARI
+model TestStep {
+  id            Int       @id @default(autoincrement())
+  testRunId     Int
+  stepNumber    Int
+  timestamp     DateTime
+  action        String
+  target        String?   @db.Text
+  value         String?   @db.Text
+  screenshotId  Int?
+  aiReasoning   String?   @db.Text
+  aiConfidence  Float?
+  success       Boolean   @default(true)
+  errorMsg      String?   @db.Text
+  durationMs    Int?
+  
+  testRun       TestRun   @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+  screenshot    Screenshot? @relation(fields: [screenshotId], references: [id])
+  
+  createdAt     DateTime  @default(now())
+  
+  @@index([testRunId])
+  @@map("test_steps")
+}
+
+// PROMPT VERSİYONLARI
+model PromptVersion {
+  id                Int       @id @default(autoincrement())
+  testId            Int
+  version           String
+  promptText        String    @db.Text
+  totalRuns         Int       @default(0)
+  successCount      Int       @default(0)
+  failCount         Int       @default(0)
+  successRate       Float     @default(0)
+  avgDurationMs     Int?
+  parentVersionId   Int?
+  improvementReason String?   @db.Text
+  isActive          Boolean   @default(true)
+  
+  test              Test      @relation(fields: [testId], references: [id], onDelete: Cascade)
+  parentVersion     PromptVersion? @relation("VersionHistory", fields: [parentVersionId], references: [id])
+  childVersions     PromptVersion[] @relation("VersionHistory")
+  
+  createdAt         DateTime  @default(now())
+  
+  @@unique([testId, version])
+  @@index([testId])
+  @@map("prompt_versions")
+}
+
+// SCREENSHOT METADATA
+model Screenshot {
+  id          Int       @id @default(autoincrement())
+  filePath    String
+  fileSize    Int?
+  width       Int?
+  height      Int?
+  format      String    @default("png")
+  
+  testSteps   TestStep[]
+  
+  createdAt   DateTime  @default(now())
+  
+  @@map("screenshots")
+}
