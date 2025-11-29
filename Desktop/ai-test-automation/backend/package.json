@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node test-prisma.js"
   },
   "keywords": [],
   "author": "",
@@ -11,7 +13,13 @@
   "description": "",
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
     "playwright": "^1.56.1",
     "prisma": "^5.22.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
   }
 }
