@@ -228,6 +228,9 @@ A REST API written in Node.js and Express.js. It receives test commands, runs th
 PostgreSQL and Prisma ORM are used. Test history, step details, screenshots, and prompt versions are stored here.
 ---
 
+## Proje Yapısı
+
+```
 ai-test-automation/
 │
 ├── backend/
@@ -256,7 +259,8 @@ ai-test-automation/
 └── frontend/                        # (Under development - React)
 ```
 
-```
+---
+
 ## Technology Stack
 | Layer | Technology | Description |
 |--------|-----------|----------|
