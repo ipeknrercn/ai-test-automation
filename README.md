@@ -1,5 +1,6 @@
 # AI-Powered Test Automation Tool
 
+## TR
 > Doğal dil komutlarıyla çalışan, yapay zeka destekli otomatik test otomasyon aracı.
 
 ---
@@ -142,6 +143,7 @@ Kullanıcı Komutu (Doğal Dil)
 
 ---
 
+
 ## Veritabanı Yapısı
 
 Sistem dört ana tablo üzerinde çalışmaktadır:
@@ -195,4 +197,167 @@ npm start
 
 Bu proje, bir QA stajyerinin bitirme projesi olarak başlamış ve aktif olarak geliştirilmektedir. Her commit yeni bir fazı veya geliştirmeyi temsil etmektedir.
 
+---
+
+## EN
+
+> An AI-powered automated test automation tool that works with natural language commands.
+---
+## About the Project
+This project is being developed to automate software testing processes using artificial intelligence. Unlike traditional test automation tools, our primary goal is to enable testing of web applications using natural language commands without the need to write code.
+The project was born from the idea of reducing the manual testing load faced by a test engineer. Artificial intelligence analyzes what it sees on the screen, determines the next step itself, and automatically records each action.
+---
+## What Does It Do?
+The user writes a command like this to the system:
+```
+"Go to the site, accept cookies, log in with username and password.
+If login is successful, open the cart, clear the cart if there are products, or add to favorites if there are none."
+```
+The system receives this command, controls the browser step by step, takes a screenshot at each step, and the AI analyzes the image to determine the next action. The results are recorded in the database and reported.
+---
+## Architecture
+The project consists of three main layers:
+
+**Frontend (Under development)**
+A React interface is planned where the user can enter test commands, view past test results, and track statistics.
+
+**Backend (Active development)**
+A REST API written in Node.js and Express.js. It receives test commands, runs the browser agent, communicates with the AI service, and writes the results to the database.
+
+**Database (Completed)**
+PostgreSQL and Prisma ORM are used. Test history, step details, screenshots, and prompt versions are stored here.
+---
+
+ai-test-automation/
+│
+├── backend/
+│   ├── src/
+│   │   ├── config/
+│   │   │   └── database.js          # Prisma connection configuration
+│   │   ├── controllers/
+│   │   │   └── testController.js    # HTTP request/response management
+│   │   ├── routes/
+│   │   │   └── testRoutes.js        # API endpoint definitions
+│   │   ├── services/
+│   │   │   ├── aiService.js         # Claude Vision AI integration
+│   │   │   └── testService.js       # Test business logic and Playwright control
+│   │   └── server.js                # Express application entry point
+│   │
+│   ├── prisma/
+│   │   ├── schema.prisma            # Database schema definitions
+│   │   └── migrations/              # Database version history
+│   │
+│   ├── manual-tests/                # Manually run test scenarios
+│   ├── test-results/
+│   │   └── screenshots/             # Screenshots taken during testing
+│   │
+│   └── .env                         # Environment variables (API key, DB URL)
+│
+└── frontend/                        # (Under development - React)
+```
+
+```
+## Technology Stack
+| Layer | Technology | Description |
+|--------|-----------|----------|
+| Backend | Node.js + Express.js | REST API server |
+| Browser Automation | Playwright | Browser control and screen capture |
+| Artificial Intelligence | Claude Sonnet (Vision) | Screen analysis and decision making |
+| Database | PostgreSQL | Persistent data storage |
+| ORM | Prisma | Secure communication with the database |
+| Frontend | React (Planned) | User interface |
+---
+
+## Development Phases
+
+### Phase 1 — Playwright Basics
+Playwright setup, basic browser automation, and screenshot capture completed. Project testing infrastructure established.
+
+### Phase 2 — Database Integration
+PostgreSQL and Prisma ORM setup, database schema design, and migration structure created. Test results can now be stored persistently.
+
+### Phase 3A — Backend API
+The Express.js server, REST endpoints, Prisma integration, and error management have been completed. It has been verified with API testing tools.
+
+### Phase 3B — Artificial Intelligence Integration
+The Claude Vision API connection has been established. The system can now send screenshots to artificial intelligence and make decisions on steps based on the analysis results.
+
+### Phase 3C — Browser Agent + AI Loop
+The main loop where Playwright and AI work together is complete. Each step: take a screenshot → send to AI → make a decision → perform the action → save to the database.
+
+### Phase 4 — Prompt Versioning (Ongoing)
+Prompt performance will be measured each time a test is run, and automatic improvements will be made over time.
+
+### Phase 5 — Frontend Development (Planned)
+User interface, test history dashboard, and real-time test monitoring screen using React.
+
+### Phase 6 — Docker & Sandbox Environment (Planned)
+Isolated test environment using Docker, secure sandbox structure, and support for multiple parallel tests.
+
+---
+## How Does It Work?
+```
+User Command (Natural Language)
+         ↓
+   Backend Receives API
+         ↓
+   Playwright Opens Browser
+         ↓
+   ┌─────────────────────────┐
+   │  Capture Screen Shot    │
+   │          ↓              │
+   │  Send to Claude Vision  │
+   │          ↓              │
+   │  AI: “What should I do?”│
+   │          ↓              │
+   │  Perform Action         │
+   │          ↓              │
+   │  Save Result to Database│
+   │  Save                   │
+   └──────────┬──────────────┘
+              │ (Repeat until task is complete)
+              ↓
+   Generate Test Report
+```
+---
+
+## Database Structure
+The system operates on four main tables:
+- **Test** — Test scenario definitions and prompt texts
+- **TestRun** — Results of each test run (pass/fail, duration)
+- **TestStep** — Details of each step (which element, which action, confidence score)
+- **PromptVersion** — Prompt history and versioning based on success rates
+---
+
+## Setup (Developer)
+```bash
+# Clone the repository
+git clone https://github.com/ipeknrercn/ai-test-automation.git
+cd ai-test-automation/backend
+# Install dependencies
+npm install
+# Set environment variables
+cp .env.example .env
+# Fill the .env file with your own information
+# Create the database schema
+npx prisma generate
+npx prisma db push
+# Start the server
+npm start
+```
+
+**Requirements:** Node.js 18+, PostgreSQL 14+, Anthropic API Key
+---
+
+## API Endpoints
+| Method | Endpoint | Description |
+|--------|----------|----------|
+| GET | `/health` | Server status check |
+| POST | `/api/tests/run` | Run new test |
+| GET | `/api/tests/history` | Past test results |
+| GET | `/api/tests/stats` | Statistics and success rates |
+
+---
+## Developer Note
+This project began as a QA intern's final project and is actively being developed. Each commit represents a new phase or development.
 ---
