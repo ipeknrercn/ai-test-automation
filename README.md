@@ -370,6 +370,9 @@ npm start
 | GET | `/api/tests/stats` | Statistics and success rates |
 
 ---
+
 ## Developer Note
+
 This project began as a QA intern's final project and is actively being developed. Each commit represents a new phase or development.
+
 ---
