@@ -202,18 +202,26 @@ Bu proje, bir QA stajyerinin bitirme projesi olarak başlamış ve aktif olarak 
 ## EN
 
 > An AI-powered automated test automation tool that works with natural language commands.
+
 ---
 ## About the Project
+
 This project is being developed to automate software testing processes using artificial intelligence. Unlike traditional test automation tools, our primary goal is to enable testing of web applications using natural language commands without the need to write code.
 The project was born from the idea of reducing the manual testing load faced by a test engineer. Artificial intelligence analyzes what it sees on the screen, determines the next step itself, and automatically records each action.
+
 ---
+
 ## What Does It Do?
+
 The user writes a command like this to the system:
+
 ```
 "Go to the site, accept cookies, log in with username and password.
 If login is successful, open the cart, clear the cart if there are products, or add to favorites if there are none."
 ```
+
 The system receives this command, controls the browser step by step, takes a screenshot at each step, and the AI analyzes the image to determine the next action. The results are recorded in the database and reported.
+
 ---
 ## Architecture
 The project consists of three main layers:
