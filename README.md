@@ -198,6 +198,10 @@ npm start
 Bu proje, bir QA stajyerinin bitirme projesi olarak başlamış ve aktif olarak geliştirilmektedir. Her commit yeni bir fazı veya geliştirmeyi temsil etmektedir.
 
 ---
+---
+---
+---
+
 
 ## EN
 
