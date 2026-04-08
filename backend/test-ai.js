@@ -3,7 +3,7 @@ require('dotenv').config();
 const aiService = require('./src/services/aiService');
 
 (async () => {
-  console.log('🤖 AI Test\n');
+  console.log('AI Test\n');
 
   const result = await aiService.testConnection();
   
