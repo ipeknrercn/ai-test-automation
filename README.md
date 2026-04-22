@@ -192,12 +192,6 @@ npm start
 
 
 ---
-
-## Geliştirici Notu
-
-Bu proje, bir QA stajyerinin bitirme projesi olarak başlamış ve aktif olarak geliştirilmektedir. Her commit yeni bir fazı veya geliştirmeyi temsil etmektedir.
-
----
 ---
 ---
 ---
@@ -375,8 +369,3 @@ npm start
 
 ---
 
-## Developer Note
-
-This project began as a QA intern's final project and is actively being developed. Each commit represents a new phase or development.
-
----
