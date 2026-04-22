@@ -19,7 +19,7 @@ class TestService {
   }
 
   // ───────────────────────────────────────────────────────────────────────
-  // Testi çalıştır — Artık gerçek AI döngüsü burada başlıyor
+  // Testi çalıştır — AI döngüsü browserAgentAi üzerinden başlar
   // ───────────────────────────────────────────────────────────────────────
   async runTest(testData) {
     // 1. Test kaydını oluştur
@@ -43,25 +43,41 @@ class TestService {
     console.log(`📝 Prompt: "${testData.userPrompt}"`);
 
     // 3. AI browser agent döngüsünü başlat
-    //    Bu çağrı döngünün tamamlanmasını bekler (async/await)
-    const result = await browserAgentAI.executeTest(
-      testRun.id,
-      testData.userPrompt,
-      testData.targetUrl
-    );
+    let result;
+    try {
+      result = await browserAgentAI.executeTest(
+        testRun.id,
+        testData.userPrompt,
+        testData.targetUrl
+      );
+    } catch (unexpectedError) {
+      // browserAgentAI içinde yakalanmayan kritik hata
+      result = {
+        success: false,
+        totalSteps: 0,
+        duration: 0,
+        error: unexpectedError.message
+      };
+    }
 
     // 4. TestRun kaydını sonuçla güncelle
-    const finalStatus = result.success ? 'SUCCESS' : (result.error ? 'ERROR' : 'FAIL');
+    const finalStatus = result.success
+      ? 'SUCCESS'
+      : result.error
+        ? 'ERROR'
+        : 'FAIL';
 
     await prisma.testRun.update({
       where: { id: testRun.id },
       data: {
         status: finalStatus,
         endTime: new Date(),
-        durationMs: result.duration,
+        durationMs: result.duration || 0,
         errorMsg: result.error || null,
       }
     });
+
+    console.log(`\n📊 Test sonucu: ${finalStatus} (${(result.duration / 1000).toFixed(1)}s)`);
 
     // 5. Tamamlanmış kaydı tüm detaylarıyla döndür
     return await prisma.testRun.findUnique({
@@ -77,7 +93,7 @@ class TestService {
   }
 
   // ───────────────────────────────────────────────────────────────────────
-  // Test geçmişini getir (değişmedi)
+  // Test geçmişini getir
   // ───────────────────────────────────────────────────────────────────────
   async getTestHistory(limit = 10) {
     return await prisma.testRun.findMany({
@@ -93,7 +109,7 @@ class TestService {
   }
 
   // ───────────────────────────────────────────────────────────────────────
-  // Belirli bir testi getir (değişmedi)
+  // Belirli bir testi getir
   // ───────────────────────────────────────────────────────────────────────
   async getTestById(id) {
     return await prisma.testRun.findUnique({
@@ -109,7 +125,25 @@ class TestService {
   }
 
   // ───────────────────────────────────────────────────────────────────────
-  // İstatistikler (değişmedi)
+  // RUNNING takılı kalan testleri temizle
+  // Sunucu restart sonrası RUNNING kalan kayıtları FAIL'e çek
+  // ───────────────────────────────────────────────────────────────────────
+  async cleanupStaleRuns() {
+    const updated = await prisma.testRun.updateMany({
+      where: { status: 'RUNNING' },
+      data: {
+        status: 'FAIL',
+        errorMsg: 'Sunucu yeniden başlatıldı, test yarıda kesildi.',
+        endTime: new Date()
+      }
+    });
+    if (updated.count > 0) {
+      console.log(`🧹 ${updated.count} adet takılı RUNNING test temizlendi.`);
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // İstatistikler
   // ───────────────────────────────────────────────────────────────────────
   async getStats() {
     const totalTests = await prisma.testRun.count();
@@ -120,7 +154,9 @@ class TestService {
       total: totalTests,
       success: successTests,
       failed: failedTests,
-      successRate: totalTests > 0 ? ((successTests / totalTests) * 100).toFixed(2) : 0
+      successRate: totalTests > 0
+        ? ((successTests / totalTests) * 100).toFixed(2)
+        : 0
     };
   }
 }

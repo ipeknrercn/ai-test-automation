@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+/* Sınıf tabanlı karanlık mod: html.dark yokken yalnızca aydınlık stilleri; toggle ile çalışır. */
+@custom-variant dark (&:where(.dark, .dark *));
+

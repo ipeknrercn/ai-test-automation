@@ -2,6 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const testRoutes = require('./routes/testRoutes');
 
 const app = express();
@@ -13,7 +14,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Static files (screenshots)
-app.use('/screenshots', express.static('../test-results/screenshots'));
+app.use('/screenshots', express.static(path.join(__dirname, '../test-results/screenshots')));
 
 // Routes
 app.use('/api/tests', testRoutes);
@@ -39,6 +40,9 @@ app.use((err, req, res, next) => {
     error: 'Internal server error'
   });
 });
+
+const testService = require('./services/testService');
+testService.cleanupStaleRuns();
 
 // Start server
 app.listen(PORT, () => {
