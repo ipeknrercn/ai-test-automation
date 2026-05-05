@@ -20,10 +20,10 @@ model Test {
   targetUrl   String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
-  
+
   testRuns       TestRun[]
   promptVersions PromptVersion[]
-  
+
   @@map("tests")
 }
 
@@ -37,14 +37,19 @@ model TestRun {
   durationMs  Int?
   errorMsg    String?   @db.Text
   browser     String    @default("chromium")
-  
-  test        Test      @relation(fields: [testId], references: [id], onDelete: Cascade)
-  steps       TestStep[]
-  
+
+  // YENİ: Hangi prompt versiyonu kullanıldı
+  promptVersionId Int?
+
+  test            Test           @relation(fields: [testId], references: [id], onDelete: Cascade)
+  promptVersion   PromptVersion? @relation(fields: [promptVersionId], references: [id])
+  steps           TestStep[]
+
   createdAt   DateTime  @default(now())
-  
+
   @@index([testId])
   @@index([status])
+  @@index([promptVersionId])
   @@map("test_runs")
 }
 
@@ -63,12 +68,12 @@ model TestStep {
   success       Boolean   @default(true)
   errorMsg      String?   @db.Text
   durationMs    Int?
-  
+
   testRun       TestRun   @relation(fields: [testRunId], references: [id], onDelete: Cascade)
   screenshot    Screenshot? @relation(fields: [screenshotId], references: [id])
-  
+
   createdAt     DateTime  @default(now())
-  
+
   @@index([testRunId])
   @@map("test_steps")
 }
@@ -77,23 +82,26 @@ model TestStep {
 model PromptVersion {
   id                Int       @id @default(autoincrement())
   testId            Int
-  version           String
+  version           String    // "v1.0", "v1.1" gibi
   promptText        String    @db.Text
   totalRuns         Int       @default(0)
   successCount      Int       @default(0)
   failCount         Int       @default(0)
+  bugCount          Int       @default(0)
   successRate       Float     @default(0)
   avgDurationMs     Int?
   parentVersionId   Int?
   improvementReason String?   @db.Text
   isActive          Boolean   @default(true)
-  
-  test              Test      @relation(fields: [testId], references: [id], onDelete: Cascade)
-  parentVersion     PromptVersion? @relation("VersionHistory", fields: [parentVersionId], references: [id])
+
+  test              Test            @relation(fields: [testId], references: [id], onDelete: Cascade)
+  parentVersion     PromptVersion?  @relation("VersionHistory", fields: [parentVersionId], references: [id])
   childVersions     PromptVersion[] @relation("VersionHistory")
-  
+  testRuns          TestRun[]
+
   createdAt         DateTime  @default(now())
-  
+  updatedAt         DateTime  @updatedAt
+
   @@unique([testId, version])
   @@index([testId])
   @@map("prompt_versions")
@@ -107,10 +115,10 @@ model Screenshot {
   width       Int?
   height      Int?
   format      String    @default("png")
-  
+
   testSteps   TestStep[]
-  
+
   createdAt   DateTime  @default(now())
-  
+
   @@map("screenshots")
 }

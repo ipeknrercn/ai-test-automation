@@ -6,10 +6,16 @@ const testController = require('../controllers/testController');
 // Test çalıştır
 router.post('/run', testController.runTest);
 
+// YENİ: Tekrar koş
+router.post('/:id/rerun', testController.rerunTest);
+
+// YENİ: Sil
+router.delete('/:id', testController.deleteTest);
+
 // Test geçmişi
 router.get('/history', testController.getHistory);
 
-// Test istatistikleri
+// İstatistikler
 router.get('/stats', testController.getStats);
 
 // Belirli test

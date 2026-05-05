@@ -1,122 +1,140 @@
-// src/services/aiService.js — İYİLEŞTİRİLMİŞ VERSİYON
+// src/services/aiService.js
 const Anthropic = require('@anthropic-ai/sdk');
 const { readFile } = require('fs').promises;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// GEÇERLİ ACTIONLAR
-// ═══════════════════════════════════════════════════════════════════════════
 const VALID_ACTIONS = [
   'navigate', 'click', 'fill', 'type', 'wait',
   'verify', 'press', 'scroll', 'hover', 'select',
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SYSTEM PROMPT — Detaylı ve Yapılandırılmış
+// SİSTEM PROMPT — PRODUCTION SEVİYESİ
+// Amaç: AI'ı promptun kalitesinden BAĞIMSIZ olarak doğru çalıştırmak
 // ═══════════════════════════════════════════════════════════════════════════
-const SYSTEM_PROMPT = `Sen bir QA Test Otomasyon uzmanısın. Playwright ile web uygulamalarını test ediyorsun.
-Ekran görüntüsüne ve test senaryosuna bakarak bir sonraki eylemi belirlersin.
+const SYSTEM_PROMPT = `Sen profesyonel bir QA Test Otomasyon ajanısın. Web uygulamalarını Playwright ile test ediyorsun.
 
-─── GÖREV ───
-1. Ekran görüntüsünü analiz et — sayfanın mevcut durumunu anla.
-2. Test senaryosunu ve önceki adımları oku — nerede olduğunu ve neyin kaldığını belirle.
-3. Sonraki TEK adımı JSON olarak döndür.
+═══ TEMEL DAVRANIŞ ═══
+Kullanıcının test senaryosunu yorumlarken HER ZAMAN şu sırayla düşün:
+1. Şu anda hangi sayfadayım? (Ekran görüntüsünden anla)
+2. Senaryonun hangi noktasındayım? (Önceki adımlardan anla)
+3. SONRAKİ TEK adım ne olmalı?
+4. Bu adımı yapmak için sayfada hangi element var?
+5. Mesajda "SAYFA YAPISI ÖZETİ" varsa: doğru input/select için name, id, label, placeholder ile eşleştirerek seçici yaz — böylece yanlış alana yazmayı azaltırsın.
 
-─── JSON FORMAT (SADECE BU FORMATTA CEVAP VER, BAŞKA YAZI YAZMA) ───
+═══ KRİTİK KURAL: SADECE GÖRDÜĞÜNE GÜVEN ═══
+Kullanıcı promptunda gelecek adımlardan bahsetse bile:
+- Şu anda ekranda görmediğin elementlere ASLA müdahale etme
+- Henüz açılmamış formlardaki alanları doldurmaya kalkma
+- Her adımda yalnızca o anda ekranda görünen ve hazır olan bir elementle etkileş
+- Bir input alanını doldurduktan SONRA aynı alanı tekrar dolduruyorsan DUR — yanlış selector kullanıyorsun demektir
+
+═══ JSON FORMATI (SADECE BU FORMAT, BAŞKA BİR ŞEY YAZMA) ═══
 {
-  "action": "click|fill|type|navigate|wait|verify|press|scroll|hover|select",
+  "action": "navigate|click|fill|type|select|press|wait|scroll|hover|verify",
   "target": "Playwright selector veya URL",
-  "value": "dolduracak değer (fill/type/select/wait/press için)",
-  "reasoning": "Bu adımı neden seçtiğinin detaylı açıklaması",
+  "value": "değer (fill/type/select/wait/press için)",
+  "reasoning": "Neden bu adım, hangi elementi hedefliyorsun, neden bu selector",
   "confidence": 0.95,
   "testComplete": false,
-  "alternativeSelectors": ["alternatif1", "alternatif2"]
+  "bugDetected": false,
+  "bugDescription": null,
+  "alternativeSelectors": ["alt1", "alt2", "alt3"]
 }
 
-─── SELECTOR KURALLARI (ÖNCELİK SIRASI) ───
-1. ÖNCE role-based Playwright selector kullan:
-   - role selector:      getByRole('button', { name: 'Giriş' }) → button:has-text("Giriş")
-   - text selector:      text="Giriş Yap" veya :has-text("Giriş Yap")
-2. SONRA attribute-based dene:
-   - id:                 #login-button
-   - data-testid:        [data-testid="login-btn"]
-   - name:               input[name="email"]
-   - placeholder:        input[placeholder="E-posta adresinizi girin"]
-3. SON ÇARE olarak yapısal selector:
-   - CSS combinator:     form.login-form >> input[type="email"]
-   - nth:                .menu-item >> nth=2
+═══ DROPDOWN KILAVUZU (ÇOK ÖNEMLİ) ═══
+Kullanıcı "seç", "olarak seç", "seçeneğini seç" dediğinde:
+1. Sayfada <select> elementi varsa → MUTLAKA "select" action, ASLA click kullanma
+2. <select> için value = option'ın value attribute veya görünen metin
+3. Custom dropdown (div/ul tabanlı) ise: önce container'a click, sonra option'a click
+4. Native <select> dropdown'ı click ile açma — açılınca screenshot alınamaz, timeout olur
 
-─── SELECTOR HATALARI İÇİN ÖNEMLİ NOTLAR ───
-- Önceki adımda bir selector başarısız olduysa, AYNI SELECTORU TEKRAR KULLANMA.
-- Başarısız selector'ın hata mesajını oku — element bulunamamış mı, görünür değil mi, tıklanabilir değil mi?
-- Alternatif selector stratejisine geç (örn: id yerine text-based dene).
-- alternativeSelectors dizisine en az 2 alternatif ekle.
+═══ TARİH ALANLARI İÇİN AYIRT ETME KURALLARI ═══
+Bir formda birden fazla tarih input'u olduğunda (From Date, To Date gibi):
+1. Etiket bazlı selector kullan: input yakınındaki label metnine göre seç
+   - Doğru: input[placeholder='yyyy-dd-mm']:near(:text("From Date"))
+   - Doğru: //label[contains(text(),'From Date')]/following::input[1]
+   - Doğru: [data-testid="from-date"], #from-date
+2. ASLA :last-of-type, :first-of-type gibi pozisyon-bazlı selector kullanma — yanlış input'u hedefler
+3. Bir input'u doldurduktan sonra doğrulama yap: ekran görüntüsünde o alanın gerçekten dolduğunu gör
+4. Eğer From Date dolu ve To Date boşsa, To Date'e yaz; ASLA From Date'i tekrar yazma
 
-─── ACTION AÇIKLAMALARI ───
-- click:    Bir butona, linke veya elemente tıkla. target = selector.
-- fill:     Bir input alanını TEMİZLEYİP yeni değeri yaz. target = selector, value = metin.
-- type:     Mevcut içeriğin üstüne karakter karakter yaz (fill'den farklı). target = selector, value = metin.
-- select:   HTML <select> dropdown'dan seçim yap. target = selector, value = option'ın value VEYA label (görünen metin).
-- navigate: Yeni bir URL'ye git. target = tam URL.
-- press:    Klavye tuşuna bas. value = tuş adı (Enter, Tab, Escape, vb.).
-- wait:     Belirli süre bekle. value = milisaniye (max 10000).
-- scroll:   Sayfayı aşağı kaydır (400px).
-- hover:    Elementin üzerine gel. target = selector.
-- verify:   Ekrandaki bir durumu doğrula (eylem yapmaz, sadece gözlem). reasoning'e gözlemini yaz.
+═══ DOĞRULAMA (verify) ADIMI ═══
+Kullanıcı "doğrula", "göründüğünü kontrol et", "olduğunu onayla" dediğinde:
+- action: "verify" kullan
+- target: null veya doğrulanacak elementin selector'u
+- reasoning: Ekranda ne gördüğünü detaylı yaz
+- testComplete: true (doğrulama başarılıysa)
+- Beklenen metin/durum görünüyorsa BAŞARILI bir verify yaz, sonra testComplete: true
+- Görünmüyorsa: önce wait (2000ms) dene, sonra tekrar verify
 
-─── DROPDOWN / <select> KURALLARI (KRİTİK) ───
-Bu kurallar çok önemli, her dropdown işleminde uygula:
-1. Eğer ekranda bir dropdown (<select> elementi) varsa, click DEĞİL "select" action'ı kullan.
-   - DOĞRU: { "action": "select", "target": ".product_sort_container", "value": "za" }
-   - YANLIŞ: { "action": "click", "target": "option:has-text('Name (Z to A)')" }
-2. <select> elementini TIKLAYARAK açmaya çalışma. Direkt "select" action'ı ile value seç.
-3. Aynı dropdown'dan ardışık farklı seçimler yapılması isteniyorsa:
-   - Her seçim ayrı bir adımdır.
-   - Her adımda "select" action'ını tekrar kullan.
-   - Arada dropdown'u "açmana" gerek yok — select action'ı bunu otomatik yapar.
-4. value alanında option'ın value attribute'unu VEYA görünen metnini kullanabilirsin:
-   - value attribute: "za", "az", "lohi", "hilo"
-   - görünen metin:   "Name (Z to A)", "Name (A to Z)", "Price (low to high)"
+═══ TEST TAMAMLAMA KURALLARI ═══
+testComplete: true yap SADECE:
+- Kullanıcının istediği TÜM adımlar başarıyla yapıldıysa
+- Doğrulama adımında beklenen durum görüldüyse
+- Bug tespit edildiyse (bugDetected: true ile birlikte)
+- Devam edilemez bir engelle karşılaşıldıysa
 
-─── ÇOKLU ADIM SENARYOLARI (KRİTİK) ───
-Test senaryosunda birden fazla adım varsa (örn: "önce X yap, sonra Y yap, sonra Z yap"):
-1. Senaryodaki HER adımı sırayla yap. Birini atla.
-2. Önceki adımlara bak — hangi adımlar tamamlandı, hangileri kaldı?
-3. Bir adım başarılı olduktan sonra, senaryodaki SIRADAKI adıma geç.
-4. Tüm adımlar bitene kadar testComplete: false bırak.
-5. Eğer senaryo "A yap, sonra B yap, sonra C yap" diyorsa ve sen A'yı yaptıysan, sıradaki B'dir.
+═══ BUG TESPİTİ ═══
+bugDetected: true yap SADECE:
+- Uygulama yanlış davranıyor (beklenmeyen hata mesajı, eksik element, yanlış sonuç)
+- bugDescription'a hatayı açıkça yaz
+DİKKAT: Selector bulunamaması BUG DEĞİLDİR. Bu agent hatasıdır, alternatif selector dene.
 
-─── TEST BİTİŞ KURALLARI ───
-testComplete: true yap SADECE şu durumlarda:
-- Test senaryosundaki TÜM adımlar başarıyla tamamlandı (sadece ilk adım değil, HEPSİ).
-- Beklenen sonuç ekranda doğrulandı (verify ile).
-- Emin değilsen testComplete: false bırak, verify adımı ekle.
-- Senaryoda 5 adım varsa ve sadece 2'sini yaptıysan, testComplete KESİNLİKLE false olmalı.
+═══ SELECTOR ÖNCELİK SIRASI ═══
+1. ID: #login-button
+2. data-testid: [data-testid="username"]
+3. Name: input[name="email"]
+4. Role + text: button:has-text("Apply"), a:has-text("Login")
+5. Placeholder: input[placeholder="Username"]
+6. Yakın label ile: //label[text()="From Date"]/following::input[1]
 
-─── GENEL KURALLAR ───
-- Her zaman SADECE geçerli JSON döndür. JSON dışında hiçbir karakter, açıklama veya markdown yazma.
-- Bir adımda sadece BİR eylem yap. Birden fazla eylemi tek JSON'a sığdırmaya çalışma.
-- Sayfa yükleniyorsa veya değişiyorsa wait adımı kullan.
-- confidence skoru: 0.9+ = kesin, 0.7-0.9 = muhtemelen doğru, 0.5-0.7 = belirsiz, <0.5 = çok belirsiz.`;
+ASLA:
+- :nth-child, :nth-of-type, :last-of-type kullanma (kırılgan)
+- div > div > div gibi yapısal yollar kullanma (kırılgan)
+- Aynı başarısız selector'ı tekrar deneme
 
-// ═══════════════════════════════════════════════════════════════════════════
-// AI SERVICE
+═══ BAŞARISIZ ADIM SONRASI ═══
+Önceki adımda bir selector başarısız olduysa:
+1. Aynı selector'ı KULLANMA
+2. alternativeSelectors'a en az 3 farklı strateji koy
+3. reasoning'de "önceki X başarısız oldu, şimdi Y deniyorum" yaz
+
+═══ ACTION REFERANSI ═══
+- click: butona/linke tıkla
+- fill: input'u temizle ve doldur (form field için tercih et)
+- type: harf harf yaz (özel karakterli alanlar için)
+- select: native <select> dropdown'dan seç
+- navigate: URL'ye git
+- press: klavye tuşu (Enter, Tab, Escape)
+- wait: bekle (max 5000ms)
+- scroll: aşağı kaydır
+- hover: üzerine gel
+- verify: ekranı gözlemle, eylem yapma
+
+═══ GENEL ═══
+- Sadece JSON döndür, başka hiçbir şey yazma
+- Markdown, açıklama, yorum YOK
+- Her adım yalnızca BİR eylem
+- confidence: gerçekten emin olduğun kadar (0.5+ için emin ol, 0.9+ için kesin)`;
+
 // ═══════════════════════════════════════════════════════════════════════════
 class AIService {
   constructor() {
-    if (!process.env.CLAUDE_API_KEY) {
-      throw new Error('CLAUDE_API_KEY environment variable bulunamadı!');
-    }
+    if (!process.env.CLAUDE_API_KEY) throw new Error('CLAUDE_API_KEY bulunamadı!');
     this.client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
     this.model = 'claude-sonnet-4-20250514';
     this.maxRetries = 3;
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // SCREENSHOT ANALİZ (Retry + Exponential Backoff)
-  // ───────────────────────────────────────────────────────────────────────
-  async analyzeScreenshot(screenshotPath, userPrompt, previousSteps = []) {
+  /**
+   * @param {string} screenshotPath
+   * @param {string} userPrompt
+   * @param {unknown[]} [previousSteps]
+   * @param {string} [pageContext] — Playwright’tan gelen DOM / a11y özeti (model seçicileri doğrulasın diye)
+   */
+  async analyzeScreenshot(screenshotPath, userPrompt, previousSteps = [], pageContext = '') {
     const base64Image = await this._loadScreenshot(screenshotPath);
-    const prompt = this._buildPrompt(userPrompt, previousSteps);
+    const prompt = this._buildPrompt(userPrompt, previousSteps, pageContext);
 
     let lastError;
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
@@ -128,226 +146,168 @@ class AIService {
           messages: [{
             role: 'user',
             content: [
-              {
-                type: 'image',
-                source: { type: 'base64', media_type: 'image/png', data: base64Image },
-              },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
               { type: 'text', text: prompt },
             ],
           }],
         });
-
         const rawText = response.content[0]?.text;
-        if (!rawText) {
-          throw new Error('API boş yanıt döndürdü');
-        }
-
+        if (!rawText) throw new Error('API boş yanıt döndürdü');
         return this._parseResponse(rawText);
-
       } catch (error) {
         lastError = error;
-        console.error(`   ↳ AI analiz hatası (deneme ${attempt}/${this.maxRetries}): ${error.message}`);
-
+        console.error(`   ↳ AI hatası (${attempt}/${this.maxRetries}): ${error.message}`);
         if (attempt < this.maxRetries && this._isRetryable(error)) {
-          const backoffMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
-          console.log(`   ↳ ${backoffMs}ms sonra tekrar denenecek...`);
-          await this._sleep(backoffMs);
+          await this._sleep(1000 * Math.pow(2, attempt - 1));
           continue;
         }
         break;
       }
     }
-
-    throw new Error(`AI analizi ${this.maxRetries} denemede başarısız: ${lastError.message}`);
+    throw new Error(`AI ${this.maxRetries} denemede başarısız: ${lastError.message}`);
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // BAĞLANTI TESTİ
-  // ───────────────────────────────────────────────────────────────────────
   async testConnection() {
     try {
       const response = await this.client.messages.create({
         model: this.model,
         max_tokens: 20,
-        messages: [{ role: 'user', content: 'Bağlantı testi. "OK" yaz.' }],
+        messages: [{ role: 'user', content: 'OK yaz.' }],
       });
-
-      return {
-        success: true,
-        provider: 'Anthropic Claude',
-        model: this.model,
-        response: response.content[0]?.text || 'Yanıt alındı',
-      };
+      return { success: true, model: this.model, response: response.content[0]?.text };
     } catch (error) {
-      return {
-        success: false,
-        provider: 'Anthropic Claude',
-        model: this.model,
-        error: error.message,
-      };
+      return { success: false, model: this.model, error: error.message };
     }
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Screenshot Yükle + Boyut Kontrolü
-  // ───────────────────────────────────────────────────────────────────────
   async _loadScreenshot(filePath) {
-    let buffer;
-    try {
-      buffer = await readFile(filePath);
-    } catch (err) {
-      throw new Error(`Screenshot dosyası okunamadı (${filePath}): ${err.message}`);
-    }
-
+    const buffer = await readFile(filePath);
     const sizeMB = buffer.length / (1024 * 1024);
-    if (sizeMB > 20) {
-      throw new Error(`Screenshot çok büyük: ${sizeMB.toFixed(1)}MB (max 20MB)`);
-    }
-
+    if (sizeMB > 20) throw new Error(`Screenshot çok büyük: ${sizeMB.toFixed(1)}MB`);
     return buffer.toString('base64');
   }
 
   // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Prompt Oluştur — Zengin context ile
+  // GELİŞTİRİLMİŞ PROMPT BUILDER
+  // - Önceki adımları çok daha açık formatla
+  // - Hangi alanın doldurulduğunu net göster
+  // - Tekrar eden hataları belirginleştir
   // ───────────────────────────────────────────────────────────────────────
-  _buildPrompt(userPrompt, previousSteps) {
+  _buildPrompt(userPrompt, previousSteps, pageContext = '') {
     const parts = [];
+    parts.push(`══════ TEST SENARYOSU ══════\n${userPrompt}`);
 
-    // 1. Test senaryosu
-    parts.push(`── TEST SENARYOSU ──\n${userPrompt}`);
-
-    // 2. Tamamlanan adım sayısı ve ilerleme durumu
-    const successfulSteps = previousSteps.filter(s => s.success !== false);
-    const totalSteps = previousSteps.length;
-    parts.push(`\n── İLERLEME: ${successfulSteps.length} başarılı adım tamamlandı, toplam ${totalSteps} adım atıldı ──`);
-
-    // 3. Önceki adımlar (son 10 adım, detaylı)
     if (previousSteps.length > 0) {
-      parts.push('\n── ÖNCEKİ ADIMLAR ──');
+      parts.push('\n══════ ŞİMDİYE KADAR YAPILANLAR ══════');
+      const recent = previousSteps.slice(-10);
 
-      const recentSteps = previousSteps.slice(-10);
-      recentSteps.forEach((step, i) => {
-        const stepNum = previousSteps.length - recentSteps.length + i + 1;
-        const status = step.success === false ? '❌ BAŞARISIZ' : '✅';
-        const target = step.target ? ` → ${step.target}` : '';
-        const value = step.value ? ` = "${step.value}"` : '';
-        const error = step.errorMsg ? ` | Hata: ${step.errorMsg}` : '';
-        const reasoning = step.aiReasoning ? ` | Sebep: ${step.aiReasoning}` : '';
-
-        parts.push(`${stepNum}. ${status} ${step.action}${target}${value}${error}${reasoning}`);
+      // Form alanı dolum durumu özeti — AI'ın aynı alanı tekrar doldurmasını engellemek için
+      const filledTargets = new Set();
+      previousSteps.forEach(s => {
+        if (s.success && (s.action === 'fill' || s.action === 'type' || s.action === 'select')) {
+          if (s.target) filledTargets.add(`${s.target} = "${s.value}"`);
+        }
       });
 
-      // Başarısız adımlar varsa uyarı
-      const failedSteps = recentSteps.filter(s => s.success === false);
-      if (failedSteps.length > 0) {
-        parts.push(`\n⚠️ Son ${recentSteps.length} adımda ${failedSteps.length} başarısızlık var.`);
-        parts.push('Başarısız selector\'ları TEKRAR KULLANMA. Farklı bir strateji dene.');
+      if (filledTargets.size > 0) {
+        parts.push('\n📋 ZATEN DOLDURULMUŞ ALANLAR (tekrar doldurma):');
+        filledTargets.forEach(t => parts.push(`   ✓ ${t}`));
+      }
+
+      parts.push('\n📜 SON ADIMLAR:');
+      recent.forEach((step, i) => {
+        const stepNum = previousSteps.length - recent.length + i + 1;
+        const status = step.success === false ? '❌' : '✓';
+        const target = step.target ? ` → ${step.target}` : '';
+        const value = step.value ? ` = "${step.value}"` : '';
+        const error = step.errorMsg ? `\n      ⚠️ HATA: ${step.errorMsg}` : '';
+        parts.push(`${stepNum}. ${status} ${step.action}${target}${value}${error}`);
+      });
+
+      // Son 3 adımda başarısız selector'ları belirginleştir
+      const recentFails = recent.filter(s => s.success === false);
+      if (recentFails.length > 0) {
+        parts.push('\n⚠️  YENİ BAŞARISIZ OLAN SELECTOR\'LAR (bunları KULLANMA):');
+        recentFails.forEach(s => {
+          if (s.target) parts.push(`   ✗ ${s.target}`);
+        });
       }
     }
 
-    // 4. Açık yönlendirme
-    parts.push(`\n── SONRAKİ ADIM ──
-Yukarıdaki test senaryosunu ve tamamlanan adımları dikkatlice oku.
-Senaryoda henüz YAPILMAMIŞ olan sıradaki adımı belirle ve onu yap.
-Tüm senaryo adımları tamamlandıysa testComplete: true yap.
-Sadece JSON döndür, başka bir şey yazma.`);
+    parts.push(`\n══════ ŞİMDİ NE YAP ══════
+1. Ekran görüntüsünü dikkatlice incele
+2. Yukarıdaki adımlara bak — hangi noktasındasın?
+3. SADECE ekranda gördüğün ve henüz yapılmamış SONRAKİ TEK adım için JSON döndür
+4. Aynı alanı tekrar doldurma, başarısız selector'ı tekrar kullanma`);
+
+    if (pageContext && String(pageContext).trim()) {
+      parts.push(`
+══════ SAYFA YAPISI ÖZETİ (DOM / erişilebilirlik — seçiciyi doğrula) ══════
+Bu metin Playwright ile sayfadan çıkarıldı. Hedef alanı seçerken:
+- Özellikle label, name, id, placeholder ve <select> seçenekleri ile eşleştir.
+- Görüntü ile çelişki olursa önce görünür metni/etiketi esas al; selector'ı DOM’daki name/id ile netleştir.
+${String(pageContext).trim()}`);
+    }
 
     return parts.join('\n');
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Response Parse + Katmanlı Doğrulama
-  // ───────────────────────────────────────────────────────────────────────
   _parseResponse(text) {
-    // 1. JSON'u bul ve çıkar
     const clean = text.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '').trim();
     const jsonStart = clean.indexOf('{');
     const jsonEnd = clean.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1) throw new Error(`JSON bulunamadı: "${text.substring(0, 200)}"`);
 
-    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
-      throw new Error(`Yanıtta geçerli JSON bulunamadı. Yanıt: "${text.substring(0, 200)}"`);
-    }
-
-    // 2. Parse
     let parsed;
     try {
       parsed = JSON.parse(clean.substring(jsonStart, jsonEnd + 1));
-    } catch (parseErr) {
-      throw new Error(`JSON parse hatası: ${parseErr.message}. Metin: "${clean.substring(jsonStart, jsonEnd + 1).substring(0, 200)}"`);
+    } catch (e) {
+      throw new Error(`JSON parse hatası: ${e.message}`);
     }
 
-    // 3. Action doğrulama
     if (!parsed.action || !VALID_ACTIONS.includes(parsed.action)) {
-      throw new Error(`Geçersiz veya eksik action: "${parsed.action}". Geçerli: ${VALID_ACTIONS.join(', ')}`);
+      throw new Error(`Geçersiz action: "${parsed.action}"`);
     }
-
-    // 4. Action-specific doğrulama
     const needsTarget = ['navigate', 'click', 'fill', 'type', 'hover', 'select'];
     if (needsTarget.includes(parsed.action) && !parsed.target) {
-      throw new Error(`"${parsed.action}" action'ı için target gerekli ama boş döndü`);
+      throw new Error(`"${parsed.action}" için target gerekli`);
+    }
+    if (['fill', 'type'].includes(parsed.action) && parsed.value == null) {
+      throw new Error(`"${parsed.action}" için value gerekli`);
     }
 
-    const needsValue = ['fill', 'type'];
-    if (needsValue.includes(parsed.action) && parsed.value == null) {
-      throw new Error(`"${parsed.action}" action'ı için value gerekli ama boş döndü`);
-    }
-
-    // 5. Temiz ve güvenli obje döndür
     return {
       action: parsed.action,
       target: parsed.target || null,
       value: parsed.value != null ? String(parsed.value) : null,
-      reasoning: String(parsed.reasoning || 'Açıklama verilmedi').substring(0, 300),
+      reasoning: String(parsed.reasoning || '').substring(0, 500),
       confidence: this._clampConfidence(parsed.confidence),
       testComplete: parsed.testComplete === true,
+      bugDetected: parsed.bugDetected === true,
+      bugDescription: parsed.bugDetected ? String(parsed.bugDescription || '').substring(0, 500) : null,
       alternativeSelectors: this._sanitizeAlternatives(parsed.alternativeSelectors),
     };
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Confidence değerini 0–1 arasına sıkıştır
-  // ───────────────────────────────────────────────────────────────────────
   _clampConfidence(value) {
     const num = parseFloat(value);
-    if (isNaN(num)) return 0.5; // Geçersizse varsayılan
+    if (isNaN(num)) return 0.5;
     return Math.max(0, Math.min(1, num));
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: alternativeSelectors dizisini temizle
-  // ───────────────────────────────────────────────────────────────────────
   _sanitizeAlternatives(alternatives) {
     if (!Array.isArray(alternatives)) return [];
-    return alternatives
-      .filter(s => typeof s === 'string' && s.trim().length > 0)
-      .map(s => s.trim())
-      .slice(0, 5); // Max 5 alternatif
+    return alternatives.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()).slice(0, 5);
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Hata retry edilebilir mi?
-  // ───────────────────────────────────────────────────────────────────────
   _isRetryable(error) {
-    // Rate limit
-    if (error.status === 429) return true;
-    // Server hataları
-    if (error.status >= 500) return true;
-    // Anthropic overload
-    if (error.message?.includes('overloaded')) return true;
-    // Ağ hataları
-    if (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') return true;
-    // JSON parse hatası (AI garip bir şey döndürdüyse tekrar denemek mantıklı)
-    if (error.message?.includes('JSON')) return true;
-
-    return false;
+    return error.status === 429 || error.status >= 500 ||
+      error.message?.includes('overloaded') ||
+      error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' ||
+      error.message?.includes('JSON');
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Bekleme
-  // ───────────────────────────────────────────────────────────────────────
-  _sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+  _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
 
 module.exports = new AIService();

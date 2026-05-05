@@ -1,4 +1,4 @@
-// src/services/browserAgentAI.js
+// src/services/browserAgentAi.js
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs').promises;
@@ -6,27 +6,21 @@ const prisma = require('../config/database');
 const aiService = require('./aiService');
 
 // ═══════════════════════════════════════════════════════════════════════════
-// YAPILANDIRMA
+// YAPILANDIRMA — HIZ İÇİN OPTİMİZE EDİLDİ
 // ═══════════════════════════════════════════════════════════════════════════
 const CONFIG = {
-  maxSteps: 20,                // Sonsuz döngüye karşı güvenlik sınırı
-  minConfidence: 0.5,          // Bu skorun altındaysa uyarı verilir
-  stepDelayMs: 1000,           // Her adım arasında bekleme (sayfa yüklenmesi için)
+  maxSteps: 25,                  // Karmaşık testler için artırıldı
+  minConfidence: 0.5,
+  stepDelayMs: 500,              // 1000 → 500 (yarıya indirildi)
   screenshotDir: path.join(__dirname, '../../test-results/screenshots'),
-  headless: false,             // true yapılırsa tarayıcı görünmez (CI/CD için)
-  slowMo: 300,                 // Adımları gözle takip edebilmek için yavaşlatma (ms)
-  viewport: { width: 1280, height: 800 },
-
-  // ─── Yeni eklenen ayarlar ───
-  navigationTimeout: 15000,    // Sayfa yükleme timeout (ms)
-  actionTimeout: 8000,         // Element bekleme timeout (ms)
-  maxConsecutiveFailures: 3,   // Ardışık başarısız adım limiti — aşılırsa test durur
-  retryOnSelectorFailure: true,// Selector bulunamazsa AI'dan yeni analiz iste
+  headless: false,
+  slowMo: 100,                   // 300 → 100 (3 kat hızlı)
+  navigationTimeout: 15000,
+  actionTimeout: 8000,           // 15000 → 8000 (yarıya indirildi)
+  postActionDelay: 250,          // 400 → 250 (eylem sonrası bekleme)
+  retryOnSelectorFailure: true,
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
-// BROWSER AGENT AI
-// ═══════════════════════════════════════════════════════════════════════════
 class BrowserAgentAI {
 
   constructor() {
@@ -34,464 +28,330 @@ class BrowserAgentAI {
     this.page = null;
     this.context = null;
     this.testRunId = null;
-    this.steps = [];               // AI'a context olarak gönderilen adım geçmişi
-    this.consecutiveFailures = 0;  // Ardışık başarısızlık sayacı
+    this.steps = [];
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // ANA METOD: Dışarıdan çağrılan tek giriş noktası
-  // ───────────────────────────────────────────────────────────────────────
   async executeTest(testRunId, userPrompt, targetUrl) {
     this.testRunId = testRunId;
     this.steps = [];
-    this.consecutiveFailures = 0;
     const startTime = Date.now();
 
     try {
-      // 1. Tarayıcıyı başlat
       await this._initBrowser();
-
-      // 2. Screenshot klasörünün varlığından emin ol
       await fs.mkdir(CONFIG.screenshotDir, { recursive: true });
 
-      // 3. Hedef URL'ye git (döngü başlamadan ilk navigasyon)
       if (targetUrl) {
-        await this.page.goto(targetUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: CONFIG.navigationTimeout,
-        });
-        console.log(`🌐 Hedef URL'ye gidildi: ${targetUrl}`);
+        await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeout });
+        console.log(`🌐 ${targetUrl}`);
       }
 
-      // 4. Ana AI döngüsü
       let stepCount = 0;
       let testComplete = false;
+      let bugDetected = false;
+      let bugDescription = null;
 
       while (!testComplete && stepCount < CONFIG.maxSteps) {
         stepCount++;
-        console.log(`\n${'─'.repeat(50)}`);
-        console.log(`📍 ADIM ${stepCount} / ${CONFIG.maxSteps}`);
-        console.log(`${'─'.repeat(50)}`);
+        console.log(`\n${'─'.repeat(50)}\n📍 ADIM ${stepCount} / ${CONFIG.maxSteps}\n${'─'.repeat(50)}`);
 
-        // 4.1 Ardışık başarısızlık kontrolü
-        if (this.consecutiveFailures >= CONFIG.maxConsecutiveFailures) {
-          console.log(`\n🛑 ${CONFIG.maxConsecutiveFailures} ardışık başarısızlık — test durduruluyor.`);
-          break;
-        }
-
-        // ──────────────────────────────────────────────────────────
-        // SCREENSHOT AKIŞI:
-        //   1. Eylem ÖNCE screenshot al → AI'a gönder (analiz için)
-        //   2. AI karar verir, eylemi yap
-        //   3. Eylem SONRA screenshot al → DB'ye kaydet (kullanıcı bunu görür)
-        // ──────────────────────────────────────────────────────────
-
-        // 4.2 Eylem ÖNCESİ screenshot — AI analiz için kullanacak
         const preScreenshotPath = await this._takeScreenshot(`${stepCount}_pre`);
+        const pageContext = await this._gatherPageContext();
 
-        // 4.3 AI'a gönder, karar al
         let decision;
         try {
-          decision = await aiService.analyzeScreenshot(
-            preScreenshotPath,
-            userPrompt,
-            this.steps
-          );
+          decision = await aiService.analyzeScreenshot(preScreenshotPath, userPrompt, this.steps, pageContext);
         } catch (aiError) {
-          console.error(`❌ AI servisinden yanıt alınamadı: ${aiError.message}`);
-          this.consecutiveFailures++;
+          console.error(`❌ AI yanıt veremedi: ${aiError.message}`);
+          const errorStep = await this._saveStep(
+            { action: 'verify', target: null, value: null, reasoning: `AI hatası: ${aiError.message}`, confidence: 0, testComplete: false, bugDetected: false, bugDescription: null, alternativeSelectors: [] },
+            { success: false, duration: 0, error: aiError.message },
+            preScreenshotPath, stepCount
+          );
+          this.steps.push(errorStep);
+          await this._sleep(CONFIG.stepDelayMs);
           continue;
         }
 
-        // 4.4 AI kararını doğrula
         if (!this._validateDecision(decision)) {
-          console.error(`❌ AI geçersiz karar döndürdü, adım atlanıyor.`);
-          this.consecutiveFailures++;
+          console.error(`❌ Geçersiz karar`);
+          await this._sleep(CONFIG.stepDelayMs);
           continue;
         }
 
-        console.log(`🤖 AI Kararı:`);
-        console.log(`   Action    : ${decision.action}`);
-        console.log(`   Target    : ${decision.target || '-'}`);
-        console.log(`   Value     : ${decision.value || '-'}`);
-        console.log(`   Confidence: ${(decision.confidence * 100).toFixed(0)}%`);
-        console.log(`   Reasoning : ${decision.reasoning}`);
+        console.log(`🤖 ${decision.action} → ${decision.target || '-'} ${decision.value ? `= "${decision.value}"` : ''} (${(decision.confidence * 100).toFixed(0)}%)`);
+        if (decision.reasoning) console.log(`   💭 ${decision.reasoning}`);
 
-        if (decision.confidence < CONFIG.minConfidence) {
-          console.log(`⚠️  Düşük güven skoru (${(decision.confidence * 100).toFixed(0)}%)`);
+        if (decision.bugDetected) {
+          bugDetected = true;
+          bugDescription = decision.bugDescription;
+          console.log(`🐛 BUG: ${bugDescription}`);
         }
 
-        // 4.5 Eylemi gerçekleştir
         let actionResult = await this._executeAction(decision);
 
-        // 4.6 Selector hatası + retry mekanizması
+        // Selector retry — daha akıllı
         if (!actionResult.success && CONFIG.retryOnSelectorFailure && this._isSelectorAction(decision.action)) {
-          console.log(`🔄 Selector başarısız oldu, AI'dan yeniden analiz isteniyor...`);
+          console.log(`🔄 Yeniden analiz...`);
           const retryScreenshot = await this._takeScreenshot(`${stepCount}_retry`);
+          const retryPageContext = await this._gatherPageContext();
           try {
             const retryDecision = await aiService.analyzeScreenshot(
               retryScreenshot,
               userPrompt,
-              [
-                ...this.steps,
-                {
-                  action: decision.action,
-                  target: decision.target,
-                  success: false,
-                  errorMsg: actionResult.error,
-                  note: 'Bu selector çalışmadı, lütfen alternatif bir selector belirle.',
-                },
-              ]
+              [...this.steps, { action: decision.action, target: decision.target, success: false, errorMsg: actionResult.error, value: decision.value }],
+              retryPageContext
             );
             if (this._validateDecision(retryDecision)) {
-              console.log(`🔄 Retry kararı: ${retryDecision.action} → ${retryDecision.target}`);
-              actionResult = await this._executeAction(retryDecision);
-              if (actionResult.success) {
+              const retryResult = await this._executeAction(retryDecision);
+              if (retryResult.success) {
                 decision = retryDecision;
+                actionResult = retryResult;
               }
             }
-          } catch (retryError) {
-            console.error(`   ↳ Retry analizi başarısız: ${retryError.message}`);
+          } catch (e) {
+            console.error(`   ↳ Retry başarısız: ${e.message}`);
           }
         }
 
-        // 4.7 Eylem SONRASI screenshot — kullanıcının göreceği asıl kanıt
-        let resultScreenshotPath = preScreenshotPath; // Fallback: eylem öncesi
+        if (!actionResult.success) {
+          console.log(`   ⚠️ Adım başarısız — test devam ediyor`);
+        }
+
+        let resultScreenshotPath = preScreenshotPath;
         if (actionResult.success && decision.action !== 'verify' && decision.action !== 'wait') {
           try {
-            await this._sleep(400); // Sayfanın değişikliği render etmesini bekle
+            await this._sleep(CONFIG.postActionDelay);
             resultScreenshotPath = await this._takeScreenshot(stepCount);
-            console.log(`📸 Eylem sonrası screenshot alındı.`);
-          } catch (err) {
-            console.error(`📸 Post-action screenshot alınamadı, pre-action kullanılacak: ${err.message}`);
-          }
-        } else {
-          // Başarısız eylem veya verify/wait → pre-action screenshot'ı kaydet
-          // (sayfa değişmemiş, pre = post)
+          } catch { /* pre-action kullan */ }
         }
 
-        // 4.8 Ardışık başarısızlık sayacını güncelle
-        if (actionResult.success) {
-          this.consecutiveFailures = 0;
-        } else {
-          this.consecutiveFailures++;
-          console.log(`   ↳ Ardışık başarısızlık: ${this.consecutiveFailures}/${CONFIG.maxConsecutiveFailures}`);
-        }
-
-        // 4.9 Adımı veritabanına kaydet — resultScreenshotPath eylem SONRASINI gösterir
         const savedStep = await this._saveStep(decision, actionResult, resultScreenshotPath, stepCount);
         this.steps.push(savedStep);
 
-        // 4.10 AI testi tamamlandı mı?
         testComplete = decision.testComplete === true;
         if (testComplete) {
-          console.log(`\n✅ AI testi tamamlandı olarak işaretledi.`);
+          console.log(bugDetected ? `🐛 Test bitti — bug bulundu` : `✅ Test başarıyla tamamlandı`);
         }
 
-        // 4.11 Sayfa yüklenmesi için kısa bekleme
         await this._sleep(CONFIG.stepDelayMs);
       }
 
-      // 5. Son durum screenshot'ı — testin nasıl bittiğinden bağımsız olarak her zaman al
-      try {
-        await this._sleep(500); // Sayfanın son durumunun tamamen yüklenmesini bekle
-        const finalScreenshotPath = await this._takeScreenshot('final');
-        
-        // Son screenshot'ı da veritabanına kaydet
-        const finalStats = await fs.stat(finalScreenshotPath);
-        await prisma.screenshot.create({
-          data: {
-            filePath: finalScreenshotPath,
-            fileSize: finalStats.size,
-            format: 'png',
-          },
-        });
-        console.log(`📸 Son durum screenshot'ı kaydedildi.`);
-      } catch (err) {
-        console.error(`📸 Son screenshot alınamadı: ${err.message}`);
+      if (stepCount >= CONFIG.maxSteps && !testComplete) {
+        console.log(`⚠️ Maksimum adım (${CONFIG.maxSteps})`);
       }
 
-      // 6. Sonuç değerlendirmesi
-      if (stepCount >= CONFIG.maxSteps && !testComplete) {
-        console.log(`\n⚠️  Maksimum adım sayısına ulaşıldı (${CONFIG.maxSteps}). Test durduruldu.`);
-      }
+      // Final screenshot
+      try {
+        await this._sleep(500);
+        const finalPath = await this._takeScreenshot('final');
+        const finalStats = await fs.stat(finalPath);
+        await prisma.screenshot.create({ data: { filePath: finalPath, fileSize: finalStats.size, format: 'png' } });
+      } catch { /* önemsiz */ }
 
       const duration = Date.now() - startTime;
       const failedSteps = this.steps.filter(s => !s.success).length;
+      const successSteps = this.steps.filter(s => s.success).length;
 
-      console.log(`\n🏁 Test tamamlandı — Süre: ${(duration / 1000).toFixed(1)}s, Adım: ${stepCount}, Başarısız: ${failedSteps}`);
+      console.log(`\n🏁 ${(duration/1000).toFixed(1)}s | ${stepCount} adım | ✓${successSteps} ✗${failedSteps}`);
 
       return {
-        success: testComplete,
-        totalSteps: stepCount,
-        failedSteps,
-        duration,
+        success: testComplete && !bugDetected,
+        bugDetected, bugDescription,
+        totalSteps: stepCount, failedSteps, successSteps, duration,
       };
 
     } catch (error) {
-      console.error(`\n❌ Test sırasında kritik hata: ${error.message}`);
+      console.error(`❌ Kritik: ${error.message}`);
       return {
-        success: false,
+        success: false, bugDetected: false, bugDescription: null,
         totalSteps: this.steps.length,
         failedSteps: this.steps.filter(s => !s.success).length,
+        successSteps: this.steps.filter(s => s.success).length,
         duration: Date.now() - startTime,
         error: error.message,
       };
-
     } finally {
       await this._closeBrowser();
     }
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Tarayıcıyı başlat
-  // ───────────────────────────────────────────────────────────────────────
   async _initBrowser() {
-    this.browser = await chromium.launch({
-      headless: CONFIG.headless,
-      slowMo: CONFIG.slowMo,
-      args: ['--start-maximized'],
-    });
-
-    this.context = await this.browser.newContext({
-      viewport: null, // Pencere boyutunu takip eder
-    });
-
+    this.browser = await chromium.launch({ headless: CONFIG.headless, slowMo: CONFIG.slowMo, args: ['--start-maximized'] });
+    this.context = await this.browser.newContext({ viewport: null });
     this.page = await this.context.newPage();
-
-    // Global timeout — herhangi bir locator.click/fill/vb. bu sürede bulamazsa hata verir
     this.page.setDefaultTimeout(CONFIG.actionTimeout);
-
     await this.page.bringToFront();
     console.log('✅ Tarayıcı başlatıldı');
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Ekran görüntüsü al ve dosyaya kaydet
-  // ───────────────────────────────────────────────────────────────────────
+  /**
+   * Görüntü tek başına bazen yanlış alanı işaret eder. Erişilebilirlik ağacı + görünür form
+   * kontrollerinin özeti modelin doğru Playwright seçicisi yazmasına yardım eder.
+   */
+  async _gatherPageContext() {
+    const chunks = [];
+    try {
+      const snap = await this.page.accessibility.snapshot({ interestingOnly: true });
+      const json = JSON.stringify(snap);
+      chunks.push(json.length > 10000 ? `${json.slice(0, 10000)}\n...[truncated]` : json);
+    } catch (e) {
+      chunks.push(`(accessibility snapshot: ${e.message})`);
+    }
+    try {
+      const interactive = await this.page.evaluate(() => {
+        const sel =
+          'input:not([type="hidden"]), select, textarea, button, [role="button"], [role="combobox"], [role="listbox"], a[href]';
+        const nodes = Array.from(document.querySelectorAll(sel));
+        return nodes.slice(0, 72).map((el) => {
+          const r = el.getBoundingClientRect();
+          const inView =
+            r.width > 0 &&
+            r.height > 0 &&
+            r.bottom > 0 &&
+            r.top < window.innerHeight &&
+            r.right > 0 &&
+            r.left < window.innerWidth;
+          if (!inView) return null;
+          const tag = el.tagName.toLowerCase();
+          const type = el.type || '';
+          const id = el.id || '';
+          const nm = el.name || '';
+          const ph = el.placeholder || '';
+          let label = '';
+          if (el.labels && el.labels[0]) label = (el.labels[0].innerText || '').trim().slice(0, 100);
+          if (!label) label = el.getAttribute('aria-label') || '';
+          const role = el.getAttribute('role') || '';
+          let options = null;
+          if (tag === 'select') {
+            options = Array.from(el.options)
+              .slice(0, 16)
+              .map((o) => ({ value: o.value, text: (o.text || '').trim().slice(0, 60) }));
+          }
+          return { tag, type, id, name: nm, placeholder: ph, label, role, options };
+        }).filter(Boolean);
+      });
+      chunks.push('\n--- görünür etkileşimli öğeler (özet) ---\n' + JSON.stringify(interactive));
+    } catch (e) {
+      chunks.push(`\n(interactive özet: ${e.message})`);
+    }
+    const full = chunks.join('\n');
+    return full.length > 14000 ? `${full.slice(0, 14000)}\n...[truncated]` : full;
+  }
+
   async _takeScreenshot(stepLabel) {
     const label = String(stepLabel).padStart(3, '0');
     const filename = `run_${this.testRunId}_step_${label}.png`;
     const screenshotPath = path.join(CONFIG.screenshotDir, filename);
-
     try {
       await this.page.screenshot({ path: screenshotPath, fullPage: false });
-      console.log(`📸 Screenshot alındı: ${filename}`);
     } catch (err) {
-      console.error(`📸 Screenshot alınamadı: ${err.message}`);
+      console.error(`📸 ${err.message}`);
     }
-
     return screenshotPath;
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: AI kararını doğrula — geçersiz kararlarla çökmesini engeller
-  // ───────────────────────────────────────────────────────────────────────
   _validateDecision(decision) {
-    if (!decision || typeof decision !== 'object') {
-      console.error('   ↳ Doğrulama hatası: decision null veya object değil');
-      return false;
-    }
-
-    const validActions = [
-      'navigate', 'click', 'fill', 'select', 'type',
-      'press', 'wait', 'scroll', 'hover', 'verify',
-    ];
-
-    if (!validActions.includes(decision.action)) {
-      console.error(`   ↳ Doğrulama hatası: bilinmeyen action "${decision.action}"`);
-      return false;
-    }
-
-    // Selector gerektiren action'larda target zorunlu
+    if (!decision || typeof decision !== 'object') return false;
+    const valid = ['navigate', 'click', 'fill', 'select', 'type', 'press', 'wait', 'scroll', 'hover', 'verify'];
+    if (!valid.includes(decision.action)) return false;
     const needsTarget = ['click', 'fill', 'select', 'type', 'hover', 'navigate'];
-    if (needsTarget.includes(decision.action) && !decision.target) {
-      console.error(`   ↳ Doğrulama hatası: "${decision.action}" için target gerekli ama boş`);
-      return false;
-    }
-
-    // fill ve type action'larında value zorunlu
-    if (['fill', 'type'].includes(decision.action) && decision.value == null) {
-      console.error(`   ↳ Doğrulama hatası: "${decision.action}" için value gerekli ama boş`);
-      return false;
-    }
-
-    // confidence sayısal olmalı
-    if (typeof decision.confidence !== 'number' || decision.confidence < 0 || decision.confidence > 1) {
-      console.warn(`   ↳ Uyarı: confidence geçersiz (${decision.confidence}), 0.5 olarak ayarlandı`);
-      decision.confidence = 0.5;
-    }
-
+    if (needsTarget.includes(decision.action) && !decision.target) return false;
+    if (['fill', 'type'].includes(decision.action) && decision.value == null) return false;
+    if (typeof decision.confidence !== 'number') decision.confidence = 0.5;
     return true;
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Bir action'ın selector'a bağımlı olup olmadığını kontrol et
-  // ───────────────────────────────────────────────────────────────────────
   _isSelectorAction(action) {
     return ['click', 'fill', 'select', 'type', 'hover'].includes(action);
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: AI kararını Playwright eylemine çevir
-  // ───────────────────────────────────────────────────────────────────────
   async _executeAction(decision) {
     const startTime = Date.now();
-
     try {
       switch (decision.action) {
-
         case 'navigate':
-          await this.page.goto(decision.target, {
-            waitUntil: 'domcontentloaded',
-            timeout: CONFIG.navigationTimeout,
-          });
-          console.log(`   ↳ Sayfaya gidildi: ${decision.target}`);
+          await this.page.goto(decision.target, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeout });
           break;
-
         case 'click':
-          await this._safeLocatorAction(decision.target, async (locator) => {
-            await locator.click();
-          });
-          console.log(`   ↳ Tıklandı: ${decision.target}`);
+          await this._safeAction(decision.target, l => l.click());
           break;
-
         case 'fill':
-          await this._safeLocatorAction(decision.target, async (locator) => {
-            await locator.fill(decision.value || '');
-          });
-          console.log(`   ↳ Dolduruldu: ${decision.target} = "${decision.value}"`);
+          await this._safeAction(decision.target, l => l.fill(decision.value || ''));
           break;
-
         case 'select':
-          await this._safeLocatorAction(decision.target, async (locator) => {
-            await locator.selectOption(decision.value || '');
+          await this._safeAction(decision.target, async (l) => {
+            const raw = String(decision.value ?? '').trim();
+            try {
+              await l.selectOption({ label: raw });
+            } catch {
+              try {
+                await l.selectOption(raw);
+              } catch {
+                await l.selectOption({ value: raw });
+              }
+            }
           });
-          console.log(`   ↳ Seçildi: ${decision.target} = "${decision.value}"`);
           break;
-
         case 'type':
-          await this._safeLocatorAction(decision.target, async (locator) => {
-            await locator.pressSequentially(decision.value || '', { delay: 50 });
-          });
-          console.log(`   ↳ Yazıldı: ${decision.target} = "${decision.value}"`);
+          await this._safeAction(decision.target, l => l.pressSequentially(decision.value || '', { delay: 30 }));
           break;
-
         case 'press':
           await this.page.keyboard.press(decision.value || decision.target);
-          console.log(`   ↳ Tuşa basıldı: ${decision.value || decision.target}`);
           break;
-
-        case 'wait': {
-          const waitMs = Math.min(parseInt(decision.value) || 2000, 10000); // Max 10s güvenlik
-          await this._sleep(waitMs);
-          console.log(`   ↳ Beklendi: ${waitMs}ms`);
+        case 'wait':
+          await this._sleep(Math.min(parseInt(decision.value) || 1500, 5000));
           break;
-        }
-
         case 'scroll':
           await this.page.evaluate(() => window.scrollBy(0, 400));
-          console.log(`   ↳ Kaydırıldı`);
           break;
-
         case 'hover':
-          await this._safeLocatorAction(decision.target, async (locator) => {
-            await locator.hover();
-          });
-          console.log(`   ↳ Üzerine gidildi: ${decision.target}`);
+          await this._safeAction(decision.target, l => l.hover());
           break;
-
         case 'verify':
-          console.log(`   ↳ Doğrulama adımı: ${decision.reasoning}`);
+          // verify eylem yapmaz; reasoning'i log'la
           break;
-
-        default:
-          // _validateDecision bunu zaten yakalar ama savunmacı olarak burada da var
-          console.log(`   ↳ Bilinmeyen action: ${decision.action}`);
       }
-
       return { success: true, duration: Date.now() - startTime };
-
     } catch (error) {
-      // Alternatif selectorları dene (recursive olmadan)
       if (decision.alternativeSelectors?.length) {
-        const fallbackResult = await this._tryAlternativeSelectors(decision, startTime);
-        if (fallbackResult.success) return fallbackResult;
+        const fallback = await this._tryAlternatives(decision, startTime);
+        if (fallback.success) return fallback;
       }
-
-      console.error(`   ↳ ❌ Eylem başarısız: ${error.message}`);
+      console.error(`   ❌ ${error.message}`);
       return { success: false, duration: Date.now() - startTime, error: error.message };
     }
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Element üzerinde güvenli işlem — görünür olana kadar bekler
-  //          Tüm selector-bağımlı action'lar bu metodu kullanır
-  // ───────────────────────────────────────────────────────────────────────
-  async _safeLocatorAction(selector, actionFn) {
+  async _safeAction(selector, actionFn) {
     const locator = this.page.locator(selector).first();
-
-    // Elementin DOM'da ve görünür olmasını bekle
     await locator.waitFor({ state: 'visible', timeout: CONFIG.actionTimeout });
-
-    // Eylemi gerçekleştir
+    await locator.scrollIntoViewIfNeeded();
     await actionFn(locator);
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Alternatif selectorları sırayla dene (RECURSIVE OLMADAN)
-  //          alternativeSelectors kaldırılarak _executeAction'a gönderilir
-  // ───────────────────────────────────────────────────────────────────────
-  async _tryAlternativeSelectors(decision, startTime) {
-    for (const altSelector of decision.alternativeSelectors) {
+  async _tryAlternatives(decision, startTime) {
+    for (const alt of decision.alternativeSelectors) {
       try {
-        console.log(`   ↳ Alternatif selector deneniyor: ${altSelector}`);
-
-        // ÖNEMLİ: alternativeSelectors'ı kaldırıyoruz ki recursive çağrı olmasın
-        const altDecision = {
-          ...decision,
-          target: altSelector,
-          alternativeSelectors: [], // ← Sonsuz döngüyü engelleyen kritik satır
-        };
-
-        const result = await this._executeAction(altDecision);
-        if (result.success) {
-          console.log(`   ↳ ✅ Alternatif selector başarılı: ${altSelector}`);
-          return { success: true, duration: Date.now() - startTime };
-        }
-      } catch {
-        // Bu selector da tutmadı, sıradakini dene
-      }
+        console.log(`   🔁 Alternatif: ${alt}`);
+        const result = await this._executeAction({ ...decision, target: alt, alternativeSelectors: [] });
+        if (result.success) return { success: true, duration: Date.now() - startTime };
+      } catch { /* devam */ }
     }
-
     return { success: false, duration: Date.now() - startTime, error: 'Tüm selectorlar başarısız' };
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Adımı veritabanına kaydet
-  //          screenshotPath = eylem SONRASI screenshot (eylemin sonucunu gösterir)
-  // ───────────────────────────────────────────────────────────────────────
   async _saveStep(decision, actionResult, screenshotPath, stepNumber) {
-    // 1. Screenshot kaydı
     let screenshotId = null;
     try {
       const stats = await fs.stat(screenshotPath);
-      const screenshot = await prisma.screenshot.create({
-        data: {
-          filePath: screenshotPath,
-          fileSize: stats.size,
-          format: 'png',
-        },
-      });
-      screenshotId = screenshot.id;
+      const ss = await prisma.screenshot.create({ data: { filePath: screenshotPath, fileSize: stats.size, format: 'png' } });
+      screenshotId = ss.id;
     } catch (err) {
-      console.error(`   ↳ Screenshot DB kaydı başarısız: ${err.message}`);
+      console.error(`   📸 DB: ${err.message}`);
     }
 
-    // 2. TestStep kaydı
-    let step;
     try {
-      step = await prisma.testStep.create({
+      return await prisma.testStep.create({
         data: {
           testRunId: this.testRunId,
           stepNumber,
@@ -508,47 +368,22 @@ class BrowserAgentAI {
         },
       });
     } catch (err) {
-      console.error(`   ↳ TestStep DB kaydı başarısız: ${err.message}`);
-      step = {
-        action: decision.action,
-        target: decision.target,
-        value: decision.value,
-        success: actionResult.success,
-        errorMsg: actionResult.error || null,
-        aiReasoning: decision.reasoning,
-        aiConfidence: decision.confidence,
-      };
+      console.error(`   💾 DB: ${err.message}`);
+      return { action: decision.action, target: decision.target, success: actionResult.success, value: decision.value };
     }
-
-    return step;
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Tarayıcıyı kapat
-  // ───────────────────────────────────────────────────────────────────────
   async _closeBrowser() {
     try {
-      if (this.context) {
-        await this.context.close();
-        this.context = null;
-      }
-      if (this.browser) {
-        await this.browser.close();
-        this.browser = null;
-      }
+      if (this.context) { await this.context.close(); this.context = null; }
+      if (this.browser) { await this.browser.close(); this.browser = null; }
       this.page = null;
-      console.log('👋 Tarayıcı kapatıldı');
     } catch (err) {
-      console.error(`👋 Tarayıcı kapatılırken hata: ${err.message}`);
+      console.error(`Kapatma: ${err.message}`);
     }
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // PRIVATE: Bekleme yardımcısı
-  // ───────────────────────────────────────────────────────────────────────
-  _sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+  _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
 
 module.exports = new BrowserAgentAI();
