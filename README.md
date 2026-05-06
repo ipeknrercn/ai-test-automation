@@ -369,3 +369,9 @@ npm start
 
 ---
 
+
+To run dockerfile
+docker compose up --build
+To stop the dockerfile
+docker compose down
+
