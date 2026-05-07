@@ -1,10 +1,17 @@
 import { useState, useEffect, useLayoutEffect, useRef, createContext, useContext, useMemo } from "react";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// API CONFIG & TYPES
+// API CONFIG & TYPES — Docker / Render: prod’da backend host; yerelde localhost
+// VITE_API_BASE / VITE_SCREENSHOTS_BASE ile override edebilirsin.
 // ═══════════════════════════════════════════════════════════════════════════
-const API_BASE = "https://promptqa-backend.onrender.com/api";
-const SCREENSHOTS_BASE = "https://promptqa-backend.onrender.com/screenshots";
+const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? "http://localhost:3001/api" : "https://promptqa-backend.onrender.com/api");
+const SCREENSHOTS_BASE =
+  import.meta.env.VITE_SCREENSHOTS_BASE ??
+  (import.meta.env.DEV
+    ? "http://localhost:3001/screenshots"
+    : "https://promptqa-backend.onrender.com/screenshots");
 
 interface Screenshot { id: number; filePath: string; fileSize: number | null; format: string; }
 interface TestStep {

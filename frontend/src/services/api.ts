@@ -1,7 +1,14 @@
 // src/services/api.ts
+// Yerel: localhost; prod build: Render backend (VITE_* ile override)
 
-const API_BASE = 'http://localhost:3001/api';
-const SCREENSHOTS_BASE = 'http://localhost:3001/screenshots';
+const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? 'http://localhost:3001/api' : 'https://promptqa-backend.onrender.com/api');
+const SCREENSHOTS_BASE =
+  import.meta.env.VITE_SCREENSHOTS_BASE ??
+  (import.meta.env.DEV
+    ? 'http://localhost:3001/screenshots'
+    : 'https://promptqa-backend.onrender.com/screenshots');
 
 export interface RunTestPayload {
   testName: string;
