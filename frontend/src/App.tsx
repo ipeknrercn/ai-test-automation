@@ -3,7 +3,7 @@ import { useState, useEffect, useLayoutEffect, useRef, createContext, useContext
 // ═══════════════════════════════════════════════════════════════════════════
 // API CONFIG & TYPES
 // ═══════════════════════════════════════════════════════════════════════════
-const API_BASE = "/api";
+const API_BASE = "https://promptqa-backend.onrender.com/api";
 const SCREENSHOTS_BASE = "/screenshots";
 
 interface Screenshot { id: number; filePath: string; fileSize: number | null; format: string; }
