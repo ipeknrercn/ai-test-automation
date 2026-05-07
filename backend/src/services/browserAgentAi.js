@@ -13,7 +13,7 @@ const CONFIG = {
   minConfidence: 0.5,
   stepDelayMs: 500,              // 1000 → 500 (yarıya indirildi)
   screenshotDir: path.join(__dirname, '../../test-results/screenshots'),
-  headless: false,
+  headless: true,
   slowMo: 100,                   // 300 → 100 (3 kat hızlı)
   navigationTimeout: 15000,
   actionTimeout: 8000,           // 15000 → 8000 (yarıya indirildi)
@@ -152,7 +152,7 @@ class BrowserAgentAI {
       const failedSteps = this.steps.filter(s => !s.success).length;
       const successSteps = this.steps.filter(s => s.success).length;
 
-      console.log(`\n🏁 ${(duration/1000).toFixed(1)}s | ${stepCount} adım | ✓${successSteps} ✗${failedSteps}`);
+      console.log(`\n🏁 ${(duration / 1000).toFixed(1)}s | ${stepCount} adım | ✓${successSteps} ✗${failedSteps}`);
 
       return {
         success: testComplete && !bugDetected,
