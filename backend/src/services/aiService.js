@@ -31,6 +31,7 @@ Kullanıcı promptunda gelecek adımlardan bahsetse bile:
 ═══ JSON FORMATI (SADECE BU FORMAT, BAŞKA BİR ŞEY YAZMA) ═══
 {
   "action": "navigate|click|fill|type|select|press|wait|scroll|hover|verify",
+  "elementId": 12,
   "target": "Playwright selector veya URL",
   "value": "değer (fill/type/select/wait/press için)",
   "reasoning": "Neden bu adım, hangi elementi hedefliyorsun, neden bu selector",
@@ -40,6 +41,15 @@ Kullanıcı promptunda gelecek adımlardan bahsetse bile:
   "bugDescription": null,
   "alternativeSelectors": ["alt1", "alt2", "alt3"]
 }
+
+Notlar:
+- Mümkünse action için target yerine elementId seç (Set-of-Mark numarası).
+- navigate / press / wait / scroll / verify için elementId null olabilir.
+
+═══ KAYDIRMA (scroll) — KATALOG / ÜRÜN LİSTESİ ═══
+- Daha fazla ürün, fiyat veya buton için ekranın altındaki içeriği görmek istiyorsan: action "scroll" kullan (target=null, isteğe bağlı value = piksel, örn. 600).
+- Belirsiz fiyat/tekrar yargı yazıp düşük confidence verme: önce bir kez scroll yap, sonra görünür ürünlerde seçim yap.
+- scroll keşif adımıdır; scroll için bile confidence 0.88+ verebilirsin (yanlış tıklamadan güvenli).
 
 ═══ DROPDOWN KILAVUZU (ÇOK ÖNEMLİ) ═══
 Kullanıcı "seç", "olarak seç", "seçeneğini seç" dediğinde:
@@ -131,10 +141,11 @@ class AIService {
    * @param {string} userPrompt
    * @param {unknown[]} [previousSteps]
    * @param {string} [pageContext] — Playwright’tan gelen DOM / a11y özeti (model seçicileri doğrulasın diye)
+   * @param {Array<{elementId:number,label:string,selectorHints:string[]}>} [elements]
    */
-  async analyzeScreenshot(screenshotPath, userPrompt, previousSteps = [], pageContext = '') {
+  async analyzeScreenshot(screenshotPath, userPrompt, previousSteps = [], pageContext = '', elements = []) {
     const base64Image = await this._loadScreenshot(screenshotPath);
-    const prompt = this._buildPrompt(userPrompt, previousSteps, pageContext);
+    const prompt = this._buildPrompt(userPrompt, previousSteps, pageContext, elements);
 
     let lastError;
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
@@ -193,7 +204,7 @@ class AIService {
   // - Hangi alanın doldurulduğunu net göster
   // - Tekrar eden hataları belirginleştir
   // ───────────────────────────────────────────────────────────────────────
-  _buildPrompt(userPrompt, previousSteps, pageContext = '') {
+  _buildPrompt(userPrompt, previousSteps, pageContext = '', elements = []) {
     const parts = [];
     parts.push(`══════ TEST SENARYOSU ══════\n${userPrompt}`);
 
@@ -249,6 +260,15 @@ Bu metin Playwright ile sayfadan çıkarıldı. Hedef alanı seçerken:
 ${String(pageContext).trim()}`);
     }
 
+    if (elements.length > 0) {
+      parts.push('\n══════ NUMARALI ETKİLEŞİM ELEMANLARI (Set-of-Mark) ══════');
+      for (const el of elements.slice(0, 80)) {
+        const hints = Array.isArray(el.selectorHints) ? el.selectorHints.filter(Boolean).slice(0, 3).join(' | ') : '';
+        parts.push(`#${el.elementId}: ${el.label}${hints ? ` | ${hints}` : ''}`);
+      }
+      parts.push('ÖNEMLİ: Ekrandaki kutu numarasını görüyorsan elementId doldur.');
+    }
+
     return parts.join('\n');
   }
 
@@ -268,9 +288,9 @@ ${String(pageContext).trim()}`);
     if (!parsed.action || !VALID_ACTIONS.includes(parsed.action)) {
       throw new Error(`Geçersiz action: "${parsed.action}"`);
     }
-    const needsTarget = ['navigate', 'click', 'fill', 'type', 'hover', 'select'];
-    if (needsTarget.includes(parsed.action) && !parsed.target) {
-      throw new Error(`"${parsed.action}" için target gerekli`);
+    const needsElement = ['click', 'fill', 'type', 'hover', 'select'];
+    if (needsElement.includes(parsed.action) && !parsed.target && parsed.elementId == null) {
+      throw new Error(`"${parsed.action}" için target veya elementId gerekli`);
     }
     if (['fill', 'type'].includes(parsed.action) && parsed.value == null) {
       throw new Error(`"${parsed.action}" için value gerekli`);
@@ -278,6 +298,7 @@ ${String(pageContext).trim()}`);
 
     return {
       action: parsed.action,
+      elementId: Number.isInteger(parsed.elementId) ? parsed.elementId : null,
       target: parsed.target || null,
       value: parsed.value != null ? String(parsed.value) : null,
       reasoning: String(parsed.reasoning || '').substring(0, 500),

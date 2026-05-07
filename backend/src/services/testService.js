@@ -3,31 +3,20 @@ const prisma = require('../config/database');
 const browserAgentAI = require('./browserAgentAi');
 const promptVersionService = require('./promptVersionService');
 const fs = require('fs').promises;
-const path = require('path');
 
 class TestService {
 
   async createTest(data) {
-    return await prisma.test.create({
-      data: {
-        testName: data.testName,
-        description: data.description,
-        userPrompt: data.userPrompt,
-        targetUrl: data.targetUrl
-      }
-    });
+    return await prisma.test.create({ data });
   }
 
   async runTest(testData) {
-    // 1. PROMPT VERSIYON: testName + targetUrl üzerinden versiyon bul/oluştur
-    //    Bu çağrı kendi içinde Test kaydı da oluşturur
     const promptVersion = await promptVersionService.findOrCreateVersion(
       testData.testName,
       testData.targetUrl,
       testData.userPrompt
     );
 
-    // 2. TestRun kaydını oluştur
     const testRun = await prisma.testRun.create({
       data: {
         testId: promptVersion.testId,
@@ -40,7 +29,6 @@ class TestService {
 
     console.log(`\n🚀 Test başlatıldı — Run ID: ${testRun.id} | Versiyon: ${promptVersion.version}`);
 
-    // 3. AI döngüsünü çalıştır
     let result;
     try {
       result = await browserAgentAI.executeTest(testRun.id, testData.userPrompt, testData.targetUrl);
@@ -52,48 +40,29 @@ class TestService {
       };
     }
 
-    // 4. Durum belirle
     let finalStatus;
-    if (result.bugDetected) finalStatus = 'BUG_FOUND';
+    if (result.manualReview) finalStatus = 'ERROR';
+    else if (result.bugDetected) finalStatus = 'BUG_FOUND';
     else if (result.success) finalStatus = 'SUCCESS';
     else if (result.error) finalStatus = 'ERROR';
     else finalStatus = 'FAIL';
 
     const errorMsg = result.bugDetected
       ? `BUG: ${result.bugDescription}`
-      : result.error || null;
+      : result.manualReviewReason || result.error || null;
 
-    // 5. TestRun güncelle
     await prisma.testRun.update({
       where: { id: testRun.id },
-      data: {
-        status: finalStatus,
-        endTime: new Date(),
-        durationMs: result.duration || 0,
-        errorMsg
-      }
+      data: { status: finalStatus, endTime: new Date(), durationMs: result.duration || 0, errorMsg }
     });
 
-    // 6. Prompt versiyon istatistiklerini güncelle
     await promptVersionService.updateStats(promptVersion.id, finalStatus, result.duration);
 
     console.log(`📊 Sonuç: ${finalStatus} | ${promptVersion.version} güncellendi`);
 
-    return await prisma.testRun.findUnique({
-      where: { id: testRun.id },
-      include: {
-        test: true,
-        promptVersion: true,
-        steps: { include: { screenshot: true }, orderBy: { stepNumber: 'asc' } }
-      }
-    });
+    return await this.getTestById(testRun.id);
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // YENİ: Bir testi belirli prompt ile yeniden koş
-  // testRunId verilirse → onun bilgileriyle yeniden koşar
-  // overridePrompt verilirse → orijinal yerine bu prompt kullanılır
-  // ───────────────────────────────────────────────────────────────────────
   async rerunTest(testRunId, overridePrompt = null) {
     const original = await prisma.testRun.findUnique({
       where: { id: parseInt(testRunId) },
@@ -109,72 +78,72 @@ class TestService {
     });
   }
 
+  // Test history — folders dahil
   async getTestHistory(limit = 50) {
-    return await prisma.testRun.findMany({
+    const runs = await prisma.testRun.findMany({
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: {
         test: true,
         promptVersion: { select: { version: true, successRate: true, isActive: true } },
-        steps: { include: { screenshot: true } }
+        steps: { include: { screenshot: true } },
+        folderLinks: {
+          include: { folder: true }
+        }
       }
     });
+
+    // folderLinks'i düzleştir → folders array
+    return runs.map(r => ({
+      ...r,
+      folders: r.folderLinks.map(l => l.folder),
+      folderLinks: undefined
+    }));
   }
 
   async getTestById(id) {
-    return await prisma.testRun.findUnique({
+    const run = await prisma.testRun.findUnique({
       where: { id: parseInt(id) },
       include: {
         test: true,
         promptVersion: true,
-        steps: { include: { screenshot: true }, orderBy: { stepNumber: 'asc' } }
+        steps: { include: { screenshot: true }, orderBy: { stepNumber: 'asc' } },
+        folderLinks: { include: { folder: true } }
       }
     });
+
+    if (!run) return null;
+
+    return {
+      ...run,
+      folders: run.folderLinks.map(l => l.folder),
+      folderLinks: undefined
+    };
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  // YENİ: Bir testi (TestRun ve ilgili tüm verileri) sil
-  // Cascade delete sayesinde steps ve screenshot meta otomatik silinir
-  // ───────────────────────────────────────────────────────────────────────
   async deleteTestRun(testRunId) {
     const id = parseInt(testRunId);
 
-    // Önce screenshot dosyalarını topla (silmek için)
     const run = await prisma.testRun.findUnique({
       where: { id },
-      include: {
-        steps: { include: { screenshot: true } }
-      }
+      include: { steps: { include: { screenshot: true } } }
     });
 
     if (!run) throw new Error('Silinecek test bulunamadı');
 
-    const screenshotPaths = run.steps
-      .map(s => s.screenshot?.filePath)
-      .filter(Boolean);
+    const screenshotPaths = run.steps.map(s => s.screenshot?.filePath).filter(Boolean);
 
-    // TestRun sil — steps cascade ile gider
     await prisma.testRun.delete({ where: { id } });
 
-    // Bu testRun'a bağlı orphan screenshot'ları temizle
-    // (testStep silinince screenshotId null olur, orphan kalır)
-    const orphanScreenshots = await prisma.screenshot.findMany({
+    const orphans = await prisma.screenshot.findMany({
       where: { testSteps: { none: {} } }
     });
-
-    if (orphanScreenshots.length > 0) {
-      await prisma.screenshot.deleteMany({
-        where: { id: { in: orphanScreenshots.map(s => s.id) } }
-      });
+    if (orphans.length > 0) {
+      await prisma.screenshot.deleteMany({ where: { id: { in: orphans.map(s => s.id) } } });
     }
 
-    // Disk'ten dosyaları sil (best-effort)
     for (const filePath of screenshotPaths) {
-      try {
-        await fs.unlink(filePath);
-      } catch (err) {
-        // Dosya zaten silinmiş veya yok — sorun değil
-      }
+      try { await fs.unlink(filePath); } catch {}
     }
 
     return { deleted: true, screenshotsRemoved: screenshotPaths.length };
