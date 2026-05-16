@@ -31,7 +31,12 @@ class TestService {
 
     let result;
     try {
-      result = await browserAgentAI.executeTest(testRun.id, testData.userPrompt, testData.targetUrl);
+      result = await browserAgentAI.executeTest(
+        testRun.id,
+        testData.userPrompt,
+        testData.targetUrl,
+        { architectureVersion: testData.architectureVersion }
+      );
     } catch (err) {
       result = {
         success: false, bugDetected: false, bugDescription: null,
@@ -41,15 +46,17 @@ class TestService {
     }
 
     let finalStatus;
-    if (result.manualReview) finalStatus = 'ERROR';
-    else if (result.bugDetected) finalStatus = 'BUG_FOUND';
+    if (result.bugDetected) finalStatus = 'BUG_FOUND';
     else if (result.success) finalStatus = 'SUCCESS';
+    else if (result.manualReview) finalStatus = 'ERROR';
     else if (result.error) finalStatus = 'ERROR';
     else finalStatus = 'FAIL';
 
     const errorMsg = result.bugDetected
       ? `BUG: ${result.bugDescription}`
-      : result.manualReviewReason || result.error || null;
+      : result.success && result.manualReviewReason
+        ? `⚠️ ${result.manualReviewReason}`
+        : (result.failureSummary || result.error || result.manualReviewReason || null);
 
     await prisma.testRun.update({
       where: { id: testRun.id },

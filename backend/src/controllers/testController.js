@@ -5,11 +5,11 @@ class TestController {
   // POST /api/tests/run
   async runTest(req, res) {
     try {
-      const { testName, userPrompt, targetUrl } = req.body;
+      const { testName, userPrompt, targetUrl, architectureVersion } = req.body;
       if (!testName || !userPrompt) {
         return res.status(400).json({ success: false, error: 'testName and userPrompt are required' });
       }
-      const result = await testService.runTest({ testName, userPrompt, targetUrl });
+      const result = await testService.runTest({ testName, userPrompt, targetUrl, architectureVersion });
       res.json({ success: true, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

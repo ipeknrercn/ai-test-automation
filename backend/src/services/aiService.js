@@ -1,17 +1,18 @@
 // src/services/aiService.js
 //
-// AI SERVICE (v3 — Final)
-//
-// İYİLEŞTİRMELER:
-// 1. Tarih kullanıcı promptunda yanlışsa AI'ya "düzelt" talimatı verildi
-// 2. Hover-based menüler için açıklama
-// 3. Form validation hatalarını anlama (örn: "To date should be after from date")
+// V2/V3/V4 için: ID tabanlı AI service.
+// somEnabled flag'i ile prompt değiştirilir (V2: SoM yok, V3+: SoM var).
 
 const Anthropic = require('@anthropic-ai/sdk');
 
 const VALID_ACTIONS = ['click', 'fill', 'type', 'select', 'press', 'wait', 'scroll', 'hover', 'verify', 'navigate', 'complete'];
 
-const SYSTEM_PROMPT = `Sen bir QA test otomasyon ajanısın. Ekran görüntüsünde numaralı kutular (bounding box) ile işaretlenmiş etkileşimli elementler görüyorsun.
+function buildSystemPrompt(somEnabled) {
+  const visualNote = somEnabled
+    ? 'Ekran görüntüsünde numaralı kutular (bounding box) ile işaretlenmiş etkileşimli elementler görüyorsun. Element listesindeki ID\'ler ekrandaki kutu numaralarına karşılık geliyor.'
+    : 'Ekran görüntüsünde sayfa düz haliyle. Etkileşimli elementlerin listesini ayrıca aşağıda göreceksin. Doğru ID\'yi listeden seç.';
+
+  return `Sen bir QA test otomasyon ajanısın. ${visualNote}
 
 ## GÖREVİN
 Kullanıcının verdiği test promptunu adım adım uygulamak için, ekrandaki numaralı elementlerden birini seçip aksiyon belirleyeceksin.
@@ -19,99 +20,70 @@ Kullanıcının verdiği test promptunu adım adım uygulamak için, ekrandaki n
 ## KRİTİK KURALLAR
 
 ### 1. ASLA KOORDİNAT TAHMİN ETME
-Sadece numaralı kutu ID'lerinden birini seç. Görmüyorsan scroll/wait dene.
+Sadece element listesindeki ID'lerden birini seç. Görmüyorsan scroll/wait dene.
+
+### 1b. MENÜ / NAVİGASYON
+"Contact", "İletişim" gibi menü için: element listesinde text'i TAM eşleşen ID'yi seç.
+Dil (EN/TR), logo veya başka menü öğesini contact yerine seçme.
+Menü tıklaması için action: click (link veya button); contact sayfası için text="CONTACT" veya "İLETİŞİM" olan elementi kullan.
+
+### 1d. FORM / SAYFA İÇİ BUTONLARI
+CONTINUE, SUBMIT, CHECKOUT, FINISH, Add to cart, Remove — bunlar menü navigasyonu değildir.
+URL değişmese bile (aynı inventory/checkout sayfası) tıklama başarılıdır.
+Gerçek menü: CONTACT, Leave, Home gibi üst menü linkleri.
+
+### 1c. KART / KUTU SEÇİMİ (Purchase, Rental, Contact Us vb.)
+Kullanıcı başlık + alt açıklama ile bir kutuyu tarif ediyorsa (örn. "Contact Us" ve "Share your questions..."),
+element listesinde text alanında HER İKİ metni de içeren ID'yi seç.
+"Purchase" veya "Rental" kutusunu Contact Us istendiğinde seçme.
+Aynı sayfada birden fazla MuiCardActionArea varsa sadece css sınıfına güvenme; text eşleşmesine göre ID seç.
 
 ### 2. AYNI HATAYI TEKRAR ETME
-Eğer önceki adımda bir element için "FAIL" gördüysen, AYNI elementi AYNI aksiyonla tekrar deneme. Şunları dene:
-  a) Farklı element ID'si — belki o alanın yanında bir alternatif var
-  b) Farklı aksiyon türü — fill yerine type
-  c) Önce başka bir adım — clear butonuna tıkla, sonra fill
-  d) Wait + scroll dene
+Önceki adımda bir element için "FAIL" gördüysen, aynı element + aynı aksiyon kombinasyonunu tekrar deneme. Farklı element ID, farklı aksiyon, ya da clear butonu dene.
 
 ### 3. ELEMENT TİPİNE GÖRE DOĞRU AKSİYON
-- "input" → fill
+- "input" → fill — element listesinde text/placeholder "Your Name", "Email" vb. ile eşleşen ID seç; komşu alanı karıştırma
 - "date-input" → fill (DOĞRU TARIH FORMATI ile!)
 - "select" → select (native HTML select)
-- "custom-dropdown" → ÖNCE click ile aç, SONRAKİ adımda dropdown'da görünen seçeneklere click et
+- "custom-dropdown" → ÖNCE click ile aç, SONRAKİ adımda seçeneklere click et
+- "dropdown-option" → açık listedeki seçenek; element listesinde text'i prompttaki seçenekle eşleşen ID'ye click (genel .oxd-select-option css kullanma)
 - "clear-button" → click (alanı temizler)
 - "button", "checkbox", "radio", "link" → click
 
-### 4. CUSTOM DROPDOWN AKIŞI
-1. Adım N: Dropdown'a click (type: custom-dropdown)
-2. Adım N+1: Yeni screenshot'ta dropdown açık → seçeneğe click
-3. Açılmadıysa wait 1500ms
+### 4. TARIH FORMATI
+Önce element listesindeki placeholder'a bak (From Date / To Date alanı).
+- placeholder "yyyy-dd-mm" → prompttaki tarihi AYNEN kullan: "2026-17-05" → value "2026-17-05" (yıl-gün-ay). ASLA "2026-05-17" yapma.
+- placeholder "yyyy-mm-dd" → standart ISO; ancak kullanıcı 2026-17-05 yazmışsa ve ortadaki sayı >12 ise 17 Mayıs → "2026-05-17".
+- Prompttaki tarih ile placeholder çelişiyorsa placeholder kazanır.
 
-### 5. CLEAR BUTONLARI
-Bir alanda zaten değer varsa ve değiştirmek istiyorsan:
-  - Önce alanın yanındaki "X" (clear-button) butonuna click
-  - Sonra fill
-
-### 6. ⚠️ TARIH FORMATI — ÇOK KRİTİK ⚠️
-
-**KULLANICI PROMPTUNDA GEÇERSİZ TARİH OLABİLİR!** Sen düzeltmekle yükümlüsün.
-
-GEÇERSİZ AYLAR: 13, 14, 15, 16, 17, 18, ..., 99 (sadece 1-12 geçerli)
-GEÇERSİZ GÜNLER: 32, 33, ... (genel olarak 1-31, ay başına farklı)
-
-Örnekler:
-  - Kullanıcı "2026-17-05" yazmışsa → BU GEÇERSİZ. 17. ay yok.
-    Düzeltme yöntemleri:
-    a) Eğer kullanıcı "DD-MM-YYYY" veya "GG-AA-YYYY" formatı kastetmiş olabilir → "17-05-2026" (17 Mayıs)
-    b) Eğer "YYYY-MM-DD" kastetmişse → "2026-05-17" (17 Mayıs)
-    c) HER İKİ DURUMDA DA: 17 Mayıs 2026'yı ifade ediyor
-
-  - Sayfada placeholder "yyyy-dd-mm" gibi bir şey yazıyorsa → format dikkat
-  - Sayfada placeholder "yyyy-mm-dd" yazıyorsa (standart ISO) → 2026-05-17
-
-**AKSI HALDE:** Form "To date should be after from date" gibi hata verir ve test sonsuz döngüye girer.
-
-**Eğer kullanıcı promptunda kesin format belirtilmediyse:**
-  - Önce placeholder'a bak (element listesinde "placeholder=" alanı var)
-  - Sonra geçerliliği kontrol et (ay 1-12 arasında mı?)
-  - Geçersizse en olası mantıklı yorumu uygula ve reasoning'de açıkla
-
-### 7. HOVER-BASED MENÜLER
-OrangeHRM, Salesforce gibi sitelerde sol menü öğelerinin üzerine gelince alt menüler açılır.
-"Leave" gibi ana menü öğesine tıklamak çalışmazsa, sistem otomatik hover yapacak — sen sadece click iste.
-
-### 8. SAYFA YÜKLENME
-Element listesi 0 veya çok azsa, sayfa henüz yüklenmemiş olabilir → wait 2000ms
-
-## YAPABILECEĞİN AKSİYONLAR
-- click, fill, type, select, press, wait, scroll, hover, verify, navigate, complete
+### 5. CUSTOM DROPDOWN
+İki adımlı: önce custom-dropdown'a click (aç), sonra type "dropdown-option" olan satıra click — seçenek metni (örn. CAN - Maternity) element text ile eşleşmeli.
+Dropdown açıkken scroll KULLANMA; seçenek listede görünüyorsa mutlaka dropdown-option ID'sine click yap.
+"CAN - Matternity" / "CAN - Maternity" yazım farklarında element listesindeki metne en yakın option ID'yi seç.
 
 ## YANIT FORMATI
-SADECE JSON döndür:
+SADECE JSON:
 
 {
   "action": "click",
   "elementId": 7,
   "value": null,
-  "reasoning": "Kullanıcı promptu '2026-17-05' yazmış ama 17. ay yok. 17 Mayıs 2026 kastetmiş olmalı, '2026-05-17' formatına düzelttim.",
+  "reasoning": "Açıklama",
   "confidence": 0.95,
   "bugDetected": false,
   "bugDescription": null
 }
 
 ## CONFIDENCE
-- 0.95+ : Element kesin
-- 0.85-0.94 : Büyük ihtimalle doğru
-- 0.70 altı : Yapma — başka strateji dene
+0.95+ kesin, 0.85+ büyük ihtimal, 0.70 altı yapma.
 
-## BUG DETECTION
-Bug = beklenen davranıştan farklı sonuç. Element bulamamak veya sayfa yavaşlığı bug DEĞİL.
-- bugDetected: true
-- bugDescription: gözlem
-- action: "complete", success: false
-
-## FORM VALIDATION HATALARI
-Eğer ekranda "To date should be after from date" gibi VALIDATION mesajı görüyorsan:
-- BU bug değil — yanlış değer girilmiş
-- Hatayı düzelt: clear butonuna tıkla, doğru değeri gir
-- Eğer kullanıcı promptu yanlış değer içeriyorsa, sen düzelt ve reasoning'de açıkla
-
-## TEST TAMAMLANDIĞINDA
-action: "complete", success: true.`;
+## TAMAMLANDIĞINDA
+action: "complete", success: true/false.
+success:true SADECE prompttaki TÜM adımlar başarıyla uygulandıysa ve geçmişte ✗ (başarısız) adım yoksa.
+Sort dropdown: istenen seçenek sayısından FAZLA select yapma (örn. 3 istendiyse 4. seçeneğe geçme).
+Seçili olsa bile her istenen seçeneği sırayla select ile uygula (1., 2., 3.).
+Önceki adımlarda hata varsa success:false ve kısa neden yaz.`;
+}
 
 class AIService {
   constructor() {
@@ -121,17 +93,15 @@ class AIService {
   }
 
   async decideNextAction(ctx) {
-    const { userPrompt, screenshotBase64, elements, history, currentUrl } = ctx;
+    const { userPrompt, screenshotBase64, elements, history, currentUrl, somEnabled } = ctx;
 
     const elementListText = elements.map(el => {
       const parts = [`[${el.id}] type=${el.type} tag=${el.tag}`];
       if (el.text) parts.push(`text="${el.text}"`);
+      if (el.fingerprint.href || el.attrs?.href) parts.push(`href="${el.fingerprint.href || el.attrs.href}"`);
       if (el.fingerprint.placeholder) parts.push(`placeholder="${el.fingerprint.placeholder}"`);
-      if (el.attrs.value) parts.push(`mevcut_değer="${el.attrs.value}"`);
-      if (el.attrs.disabled) parts.push('(disabled)');
-      if (el.type === 'custom-dropdown' && el.attrs.currentText) {
-        parts.push(`seçili="${el.attrs.currentText.substring(0, 30)}"`);
-      }
+      if (el.tag === 'input' || el.tag === 'textarea') parts.push(`(form alanı)`);
+      if (el.attrs.value) parts.push(`mevcut="${el.attrs.value}"`);
       return parts.join(' ');
     }).join('\n');
 
@@ -140,30 +110,11 @@ class AIService {
           let line = `Adım ${h.stepNumber}: ${h.action}`;
           if (h.elementId) line += ` element=${h.elementId}`;
           if (h.value) line += ` value="${h.value}"`;
-          line += h.success ? ' ✓ OK' : ' ✗ FAIL';
-          if (!h.success && h.errorReason) line += ` SEBEP: ${h.errorReason.substring(0, 150)}`;
-          if (h.strategy) line += ` (strateji: ${h.strategy})`;
+          line += h.success ? ' ✓' : ' ✗';
+          if (!h.success && h.errorReason) line += ` SEBEP: ${h.errorReason.substring(0, 120)}`;
           return line;
         }).join('\n')
       : 'Henüz adım atılmadı.';
-
-    const recentFails = history?.filter(h => !h.success).slice(-3) || [];
-    let warningSection = '';
-    if (recentFails.length >= 2) {
-      const sameElement = recentFails.every(h => h.elementId === recentFails[0].elementId);
-      const sameAction = recentFails.every(h => h.action === recentFails[0].action);
-      if (sameElement && sameAction && recentFails[0].elementId) {
-        warningSection = `
-
-## ⚠️ DİKKAT — DÖNGÜ TESPİT EDİLDİ
-Element ${recentFails[0].elementId} + ${recentFails[0].action} ${recentFails.length} kez fail oldu.
-**MUTLAKA FARKLI BİR STRATEJİ DENE!**
-- Belki tarih formatı yanlış (ay 12'den büyük olamaz!)
-- Belki önce clear butonuna basmak lazım
-- Belki form validation hatası var, ekranda kırmızı uyarı arar
-- Belki başka element seçmek lazım (yan tarafta clear veya alternatif input olabilir)`;
-      }
-    }
 
     const userMessage = `## KULLANICI TEST PROMPTU
 "${userPrompt}"
@@ -171,37 +122,32 @@ Element ${recentFails[0].elementId} + ${recentFails[0].action} ${recentFails.len
 ## MEVCUT URL
 ${currentUrl}
 
-## EKRANDA GÖRÜNEN ETKİLEŞİMLİ ELEMENTLER (${elements.length} adet)
+## EKRANDA GÖRÜNEN ELEMENTLER (${elements.length})
 ${elementListText}
 
-## ŞIMDIYE KADAR YAPILAN ADIMLAR
+## ŞIMDIYE KADAR
 ${historyText}
-${warningSection}
 
-## SIRADAKİ ADIMI BELİRLE
-Ekran görüntüsünde numaralı kutuları görüyorsun. Önceki hatalardan ders al. Sadece JSON döndür.`;
+Sıradaki adımı belirle. Sadece JSON.`;
 
     try {
       const response = await this.client.messages.create({
         model: this.model,
         max_tokens: 1024,
-        system: SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshotBase64 } },
-              { type: 'text', text: userMessage }
-            ]
-          }
-        ]
+        system: buildSystemPrompt(somEnabled !== false),
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshotBase64 } },
+            { type: 'text', text: userMessage }
+          ]
+        }]
       });
 
       const rawText = response.content[0]?.text;
       if (!rawText) throw new Error('AI boş yanıt döndürdü');
       return this._parseDecision(rawText, elements);
     } catch (err) {
-      console.error('AI karar hatası:', err.message);
       throw new Error(`AI karar veremedi: ${err.message}`);
     }
   }
@@ -210,22 +156,16 @@ Ekran görüntüsünde numaralı kutuları görüyorsun. Önceki hatalardan ders
     const clean = text.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '').trim();
     const start = clean.indexOf('{');
     const end = clean.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error('AI geçerli JSON döndürmedi');
+    if (start === -1 || end === -1) throw new Error('JSON yok');
 
-    let parsed;
-    try {
-      parsed = JSON.parse(clean.substring(start, end + 1));
-    } catch (e) {
-      throw new Error(`JSON parse hatası: ${e.message}`);
-    }
-
+    const parsed = JSON.parse(clean.substring(start, end + 1));
     if (!VALID_ACTIONS.includes(parsed.action)) throw new Error(`Geçersiz aksiyon: ${parsed.action}`);
 
     let element = null;
     if (parsed.elementId != null) {
       element = elements.find(e => e.id === parsed.elementId);
       if (!element && ['click', 'fill', 'type', 'select', 'hover'].includes(parsed.action)) {
-        throw new Error(`AI ${parsed.elementId} ID'li elementi seçti ama listede yok (max: ${elements.length})`);
+        throw new Error(`Element ${parsed.elementId} listede yok`);
       }
     }
 
@@ -233,6 +173,7 @@ Ekran görüntüsünde numaralı kutuları görüyorsun. Önceki hatalardan ders
       action: parsed.action,
       elementId: parsed.elementId || null,
       element,
+      target: parsed.target || null,
       value: parsed.value || null,
       reasoning: parsed.reasoning || '',
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,

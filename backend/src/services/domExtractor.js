@@ -39,6 +39,9 @@ const INTERACTIVE_SELECTORS = [
     // Custom dropdown'lar (OrangeHRM, Ant Design, MUI)
     '.oxd-select-text',
     '.oxd-select-text-input',
+    '.oxd-select-option',
+    '.ant-select-item',
+    '.ant-select-item-option',
     '.ant-select',
     '.MuiSelect-select',
     '.MuiAutocomplete-root',
@@ -119,7 +122,33 @@ const INTERACTIVE_SELECTORS = [
                  rect.left < vpWidth + VIEWPORT_BUFFER;
         }
   
+        function getAssociatedLabelText(el) {
+          if (el.id) {
+            const safeId = String(el.id).replace(/"/g, '\\\\"');
+            const byFor = document.querySelector('label[for="' + safeId + '"]');
+            if (byFor && byFor.innerText) return byFor.innerText.trim();
+          }
+          const parentLabel = el.closest('label');
+          if (parentLabel && parentLabel.innerText) {
+            const t = parentLabel.innerText.trim();
+            if (t.length > 0 && t.length < 80) return t;
+          }
+          return '';
+        }
+
         function getElementText(el) {
+          const tag = el.tagName.toLowerCase();
+          if (tag === 'input' || tag === 'textarea') {
+            const aria = (el.getAttribute('aria-label') || '').trim();
+            const ph = (el.placeholder || '').trim();
+            const assoc = getAssociatedLabelText(el);
+            const name = (el.name || '').trim();
+            const candidates = [aria, assoc, ph, name].filter(Boolean);
+            let text = candidates[0] || (el.title || '').trim();
+            if (!text && el.value) text = String(el.value).trim();
+            if (text.length > 80) text = text.substring(0, 77) + '...';
+            return text;
+          }
           let text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('alt') || el.title || '').trim();
           if (text.length > 80) text = text.substring(0, 77) + '...';
           return text;
@@ -136,6 +165,13 @@ const INTERACTIVE_SELECTORS = [
             return 'clear-button';
           }
   
+          // Açık dropdown seçenekleri (OrangeHRM, Ant Design)
+          if (className.includes('oxd-select-option') ||
+              className.includes('ant-select-item') ||
+              role === 'option') {
+            return 'dropdown-option';
+          }
+
           // Custom dropdown'lar
           if (className.includes('oxd-select-text') ||
               className.includes('ant-select') ||
@@ -220,7 +256,8 @@ const INTERACTIVE_SELECTORS = [
               dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || el.getAttribute('data-cy') || null,
               ariaLabel: el.getAttribute('aria-label') || null,
               placeholder: el.placeholder || null,
-              text: getElementText(el)
+              text: getElementText(el),
+              href: el.href || el.getAttribute('href') || null
             },
             bbox: {
               x: Math.round(rect.left),
