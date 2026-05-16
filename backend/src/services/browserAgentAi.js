@@ -13,7 +13,8 @@ const CONFIG = {
   stepDelayMs: 500,
   screenshotDir: path.join(__dirname, '../../test-results/screenshots'),
   // Render/Docker sunucuda headless şart; yerelde PLAYWRIGHT_HEADLESS=false ile pencereli çalıştır
-  headless: process.env.PLAYWRIGHT_HEADLESS !== 'false',
+  //headless: process.env.PLAYWRIGHT_HEADLESS !== 'false',
+  headless: true,
   slowMo: 100,
   navigationTimeout: 15000,
   actionTimeout: 8000,
