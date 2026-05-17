@@ -1,541 +1,777 @@
 // src/services/browserAgentAi.js
+//
+// ════════════════════════════════════════════════════════════════════
+// VERSION-AWARE BROWSER AGENT (DÜZELTİLMİŞ — GERÇEK DALLANMA)
+// ════════════════════════════════════════════════════════════════════
+//
+// V1 (Baseline):    Legacy AI service + tek strateji selector
+// V2 (+DOM):        Yeni AI service (ID tabanlı), TEMİZ screenshot, executeSimple
+// V3 (+SoM):        Yeni AI service + ANNOTATED screenshot, executeSimple
+// V4 (Full Hybrid): Yeni AI service + ANNOTATED screenshot + executeWithHealing
+//
+// ÖNCEKI HATA: agent her durumda V4 mantığı çalıştırıyordu, sadece env'i
+// metadata olarak kaydediyordu. ŞİMDİ: isFeatureEnabled() ile gerçek dallanma.
+
 const { chromium } = require('playwright');
-const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
-const prisma = require('../config/database');
-const aiService = require('./aiService');
 
-const CONFIG = {
-  maxSteps: 25,
-  /** Sadece fiyat seçimi/sepet vb. kritik aksiyonlarda; scroll/wait ile durdurmayın */
-  confidenceThreshold: 0.85,
-  stepDelayMs: 500,
-  screenshotDir: path.join(__dirname, '../../test-results/screenshots'),
-  // Render/Docker sunucuda headless şart; yerelde PLAYWRIGHT_HEADLESS=false ile pencereli çalıştır
-  //headless: process.env.PLAYWRIGHT_HEADLESS !== 'false',
-  headless: true,
-  slowMo: 100,
-  navigationTimeout: 15000,
-  actionTimeout: 8000,
-  postActionDelay: 250,
-  retryOnSelectorFailure: true,
-  maxInteractiveElements: 80,
-  selfHealingRetries: 2,
-};
+// ─── İKİ AYRI AI SERVICE ───
+const aiService = require('./aiService');              // V2/V3/V4 için (ID tabanlı)
+const aiServiceLegacy = require('./aiServiceLegacy');  // V1 için (selector tabanlı)
+
+const { extractInteractiveElements } = require('./domExtractor');
+const { annotateScreenshot } = require('./screenshotAnnotator');
+
+// ─── İKİ AYRI EXECUTOR ───
+const {
+  executeWithHealing,    // V4 için (9 katmanlı self-healing)
+  executeSimple,         // V2/V3 için (tek strateji)
+  evaluateConfidence,
+  isNavigationElement,
+  isFormActionElement,
+  isInPageActionElement
+} = require('./actionExecutor');
+
+// ─── VERSİYON KONTROLÜ ───
+const { resolveVersion, isFeatureEnabled } = require('../config/architectureVersion');
+const { checkPromptCompliance } = require('./promptCompliance');
+const { normalizeDateForElement } = require('../utils/dateFormat');
+
+const prisma = require('../config/database');
+
+const SCREENSHOTS_DIR = path.join(__dirname, '../../test-results/screenshots');
+const MAX_STEPS = 25;
+const STEP_DELAY_MS = 500;
+const POST_ACTION_WAIT = 1200;
+const POST_DROPDOWN_WAIT = 1500;
+const POST_SCROLL_WAIT = 800;
+const MAX_CONSECUTIVE_FAILS = 3;
+const BROWSER_SLOW_MO = Number(process.env.BROWSER_SLOW_MO || 220);
 
 class BrowserAgentAI {
-  constructor() {
-    this.browser = null;
-    this.page = null;
-    this.context = null;
-    this.testRunId = null;
-    this.steps = [];
-  }
+  /**
+   * @param {object} [options]
+   * @param {string} [options.architectureVersion] - V1|V2|V3|V4 (process.env yerine; paralel koşum güvenli)
+   */
+  async executeTest(testRunId, userPrompt, targetUrl, options = {}) {
+    await fs.mkdir(SCREENSHOTS_DIR, { recursive: true });
 
-  async executeTest(testRunId, userPrompt, targetUrl) {
-    this.testRunId = testRunId;
-    this.steps = [];
+    // ════════════════════════════════════════════════════════════════
+    // VERSİYON BİLGİSİNİ AL VE LOGla
+    // ════════════════════════════════════════════════════════════════
+    const version = resolveVersion(options.architectureVersion);
+    console.log(`\n┌────────────────────────────────────────────────────┐`);
+    console.log(`│ 🔧 Mimari: ${version.name.padEnd(40)} │`);
+    console.log(`│    DOM extraction:  ${(isFeatureEnabled('domExtraction', version) ? '✓ AÇIK' : '✗ KAPALI').padEnd(28)} │`);
+    console.log(`│    SoM annotation:  ${(isFeatureEnabled('somAnnotation', version) ? '✓ AÇIK' : '✗ KAPALI').padEnd(28)} │`);
+    console.log(`│    Self-healing:    ${(isFeatureEnabled('selfHealing', version) ? '✓ AÇIK' : '✗ KAPALI').padEnd(28)} │`);
+    console.log(`│    Loop detection:  ${(isFeatureEnabled('loopDetection', version) ? '✓ AÇIK' : '✗ KAPALI').padEnd(28)} │`);
+    console.log(`└────────────────────────────────────────────────────┘\n`);
+
+    const browser = await chromium.launch({
+      headless: false,
+      slowMo: BROWSER_SLOW_MO,
+      args: ['--start-maximized']
+    });
+    const context = await browser.newContext({ viewport: null });
+    const page = await context.newPage();
+
     const startTime = Date.now();
+    const history = [];
+    let stepNumber = 0;
+    let bugDetected = false;
+    let bugDescription = null;
+    let testCompleted = false;
+    let testSuccess = false;
+    let failureSummary = null;
+    let lastError = null;
+    let manualReview = false;
+    let manualReviewReason = null;
+    const requireLeaveThenMyLeave = /leave/.test(String(userPrompt).toLowerCase()) &&
+      /my leave/.test(String(userPrompt).toLowerCase());
+    let leaveNavDone = false;
+
+    const metrics = {
+      totalAiCalls: 0,
+      totalApiTokensEstimate: 0,
+      retryCount: 0,
+      bboxFallbacks: 0,
+      strategyUsageCounts: {},
+      confidenceScores: []
+    };
 
     try {
-      await this._initBrowser();
-      await fs.mkdir(CONFIG.screenshotDir, { recursive: true });
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(1500);
+      await page.bringToFront();
 
-      if (targetUrl) {
-        await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeout });
-        console.log(`🌐 ${targetUrl}`);
-      }
+      while (stepNumber < MAX_STEPS && !testCompleted) {
+        stepNumber++;
+        const stepStartTime = Date.now();
 
-      let stepCount = 0;
-      let testComplete = false;
-      let bugDetected = false;
-      let bugDescription = null;
-      let manualReviewReason = null;
+        console.log(`\n📍 Adım ${stepNumber}/${MAX_STEPS}`);
 
-      while (!testComplete && stepCount < CONFIG.maxSteps) {
-        stepCount++;
-        console.log(`\n${'─'.repeat(50)}\n📍 ADIM ${stepCount} / ${CONFIG.maxSteps}\n${'─'.repeat(50)}`);
+        // ──────────────────────────────────────────────────────────
+        // DÖNGÜ TESPİTİ — Sadece V3+ aktif (V1/V2 baseline davranışı)
+        // ──────────────────────────────────────────────────────────
+        if (isFeatureEnabled('loopDetection', version)) {
+          const recentFails = history.slice(-MAX_CONSECUTIVE_FAILS).filter(h => !h.success);
+          const stuck = recentFails.length >= MAX_CONSECUTIVE_FAILS &&
+            recentFails.every(h =>
+              ((h.elementId && h.elementId === recentFails[0].elementId) ||
+               (h.target && h.target === recentFails[0].target)) &&
+              h.action === recentFails[0].action
+            );
 
-        const preArtifacts = await this._captureStepArtifacts(`${stepCount}_pre`);
-        const pageContext = this._buildPageContext(preArtifacts.elements);
+          if (stuck) {
+            console.log(`   🔁 Döngü tespit edildi, test sonlandırılıyor`);
+            await this._saveStep({
+              testRunId, stepNumber, action: 'error',
+              target: null, value: null,
+              aiReasoning: `Döngü tespit edildi: ${MAX_CONSECUTIVE_FAILS} kez aynı hata`,
+              aiConfidence: 0, success: false,
+              errorMsg: 'Döngüsel hata',
+              durationMs: Date.now() - stepStartTime,
+              screenshotBuffer: await page.screenshot()
+            });
+            lastError = 'Döngüsel hata';
+            failureSummary = 'Aynı aksiyon tekrarlandı (döngü); test durduruldu.';
+            break;
+          }
+        }
 
+        // ──────────────────────────────────────────────────────────
+        // ADIM 1: SCREENSHOT
+        // ──────────────────────────────────────────────────────────
+        const cleanShot = await page.screenshot({ fullPage: false });
+
+        // ──────────────────────────────────────────────────────────
+        // ADIM 2: DOM EXTRACTION — Sadece V2+ aktif
+        // ──────────────────────────────────────────────────────────
+        let elements = [];
+        if (isFeatureEnabled('domExtraction', version)) {
+          elements = await extractInteractiveElements(page);
+          console.log(`   🔍 [V2+] DOM extraction: ${elements.length} element bulundu`);
+        } else {
+          console.log(`   ⚪ [V1] DOM extraction yok, ham screenshot kullanılıyor`);
+        }
+
+        // ──────────────────────────────────────────────────────────
+        // ADIM 3: SoM ANNOTATION — Sadece V3+ aktif
+        // ──────────────────────────────────────────────────────────
+        let aiScreenshotBase64;
+        if (isFeatureEnabled('somAnnotation', version) && elements.length > 0) {
+          const annotatedShot = await annotateScreenshot(cleanShot, elements);
+          aiScreenshotBase64 = annotatedShot.toString('base64');
+          console.log(`   🎨 [V3+] SoM annotation: ${elements.length} bounding box çizildi`);
+        } else {
+          aiScreenshotBase64 = cleanShot.toString('base64');
+          if (isFeatureEnabled('domExtraction', version)) {
+            console.log(`   ⚪ [V2] SoM yok, temiz screenshot AI'a gönderiliyor`);
+          }
+        }
+
+        // ──────────────────────────────────────────────────────────
+        // ADIM 4: AI KARAR — V1 farklı service kullanır
+        // ──────────────────────────────────────────────────────────
         let decision;
         try {
-          decision = await aiService.analyzeScreenshot(
-            preArtifacts.annotatedPath,
-            userPrompt,
-            this.steps,
-            pageContext,
-            preArtifacts.elements.map((el) => ({
-              elementId: el.elementId,
-              label: this._labelForElement(el),
-              selectorHints: [el.css, el.testId, el.nameSelector, el.roleTextSelector].filter(Boolean),
-            }))
-          );
-        } catch (aiError) {
-          console.error(`❌ AI yanıt veremedi: ${aiError.message}`);
-          const errorStep = await this._saveStep(
-            { action: 'verify', target: null, value: null, reasoning: `AI hatası: ${aiError.message}`, confidence: 0 },
-            { success: false, duration: 0, error: aiError.message },
-            preArtifacts.cleanPath,
-            stepCount
-          );
-          this.steps.push(errorStep);
-          await this._sleep(CONFIG.stepDelayMs);
-          continue;
-        }
-
-        if (!this._validateDecision(decision)) {
-          console.error('❌ Geçersiz karar');
-          await this._sleep(CONFIG.stepDelayMs);
-          continue;
-        }
-
-        const resolvedDecision = this._resolveDecisionWithElement(decision, preArtifacts.elements);
-
-        if (
-          this._requiresConfidenceGate(resolvedDecision.action) &&
-          resolvedDecision.confidence < CONFIG.confidenceThreshold
-        ) {
-          manualReviewReason = `Düşük güven skoru: ${(resolvedDecision.confidence * 100).toFixed(0)}%`;
-          console.log(`🛑 Manual review: ${manualReviewReason}`);
-          const reviewStep = await this._saveStep(
-            { ...resolvedDecision, action: 'verify', reasoning: `${resolvedDecision.reasoning || ''} | ${manualReviewReason}`.trim() },
-            { success: false, duration: 0, error: manualReviewReason },
-            preArtifacts.cleanPath,
-            stepCount
-          );
-          this.steps.push(reviewStep);
+          if (isFeatureEnabled('domExtraction', version)) {
+            // V2/V3/V4: Yeni AI service (ID tabanlı)
+            console.log(`   🤖 AI çağrısı: ID-tabanlı service (SoM=${isFeatureEnabled('somAnnotation', version) ? 'açık' : 'kapalı'})`);
+            decision = await aiService.decideNextAction({
+              userPrompt,
+              screenshotBase64: aiScreenshotBase64,
+              elements,
+              history,
+              currentUrl: page.url(),
+              somEnabled: isFeatureEnabled('somAnnotation', version)
+            });
+          } else {
+            // V1: Legacy AI service (selector tabanlı)
+            console.log(`   🤖 AI çağrısı: Legacy service (selector istiyor)`);
+            decision = await aiServiceLegacy.decideNextAction({
+              userPrompt,
+              screenshotBase64: aiScreenshotBase64,
+              history,
+              currentUrl: page.url()
+            });
+          }
+          metrics.totalAiCalls++;
+          metrics.totalApiTokensEstimate += this._estimateTokens(elements, history);
+          if (decision.confidence != null) metrics.confidenceScores.push(decision.confidence);
+        } catch (err) {
+          console.error(`   ❌ AI karar hatası: ${err.message}`);
+          await this._saveStep({
+            testRunId, stepNumber, action: 'error',
+            target: null, value: null,
+            aiReasoning: `AI karar veremedi: ${err.message}`,
+            aiConfidence: 0, success: false, errorMsg: err.message,
+            durationMs: Date.now() - stepStartTime,
+            screenshotBuffer: cleanShot
+          });
+          lastError = err.message;
+          failureSummary = `AI karar veremedi: ${err.message}`.substring(0, 400);
           break;
         }
 
-        console.log(
-          `🤖 ${resolvedDecision.action} → ${resolvedDecision.target || `#${resolvedDecision.elementId || '-'}`} ${
-            resolvedDecision.value ? `= "${resolvedDecision.value}"` : ''
-          } (${(resolvedDecision.confidence * 100).toFixed(0)}%)`
-        );
-        if (resolvedDecision.reasoning) console.log(`   💭 ${resolvedDecision.reasoning}`);
+        const decisionLog = `${decision.action}` +
+          (decision.elementId ? ` element=${decision.elementId}` : '') +
+          (decision.target ? ` target=${decision.target}` : '') +
+          (decision.value ? ` value="${String(decision.value).substring(0, 30)}"` : '');
+        console.log(`   🎯 Karar: ${decisionLog} (güven: %${(decision.confidence * 100).toFixed(0)})`);
 
-        if (resolvedDecision.bugDetected) {
+        // ──────────────────────────────────────────────────────────
+        // Bug Detection
+        // ──────────────────────────────────────────────────────────
+        if (decision.bugDetected) {
           bugDetected = true;
-          bugDescription = resolvedDecision.bugDescription;
-          console.log(`🐛 BUG: ${bugDescription}`);
+          bugDescription = decision.bugDescription;
+          failureSummary = `Uygulama hatası tespit edildi: ${bugDescription || 'AI bug bildirdi'}`;
+          testSuccess = false;
+          await this._saveStep({
+            testRunId, stepNumber, action: decision.action,
+            target: decision.element ? this._fingerprintToTarget(decision.element) : decision.target,
+            value: decision.value,
+            aiReasoning: decision.reasoning, aiConfidence: decision.confidence,
+            success: false, errorMsg: `BUG: ${bugDescription}`,
+            durationMs: Date.now() - stepStartTime,
+            screenshotBuffer: cleanShot
+          });
+          break;
         }
 
-        let actionResult = await this._executeAction(resolvedDecision);
-        if (!actionResult.success && CONFIG.retryOnSelectorFailure && this._isSelectorAction(resolvedDecision.action)) {
-          console.log('🔄 Self-healing fallback...');
-          actionResult = await this._selfHealAction(resolvedDecision, actionResult, userPrompt);
+        // ──────────────────────────────────────────────────────────
+        // Tamamlama
+        // ──────────────────────────────────────────────────────────
+        if (decision.action === 'complete') {
+          testCompleted = true;
+          const outcome = this._resolveCompletionOutcome(history, decision, userPrompt);
+          testSuccess = outcome.success;
+          failureSummary = outcome.failureSummary;
+          await this._saveStep({
+            testRunId, stepNumber, action: 'complete',
+            target: null, value: null,
+            aiReasoning: decision.reasoning, aiConfidence: decision.confidence,
+            success: testSuccess,
+            errorMsg: testSuccess ? null : failureSummary,
+            durationMs: Date.now() - stepStartTime,
+            screenshotBuffer: cleanShot
+          });
+          if (testSuccess) {
+            console.log('   ✅ Test tamamlandı (tüm adımlar başarılı)');
+          } else {
+            console.log(`   ⛔ Test başarısız: ${failureSummary}`);
+          }
+          break;
         }
+
+        // ──────────────────────────────────────────────────────────
+        // ADIM 5: AKSİYON UYGULAMA — V4 farklı executor kullanır
+        // ──────────────────────────────────────────────────────────
+        const confEval = evaluateConfidence(decision.confidence);
+        if (!confEval.passed) {
+          console.log(`   ⚠️  ${confEval.message}`);
+          manualReview = true;
+          manualReviewReason = confEval.message;
+        }
+
+        let actionResult;
+        if (requireLeaveThenMyLeave && decision.action === 'click') {
+          const targetText = String(decision.element?.text || '').toLowerCase();
+          const isMyLeave = targetText.includes('my leave');
+          if (isMyLeave && !leaveNavDone) {
+            actionResult = {
+              success: false,
+              strategyUsed: null,
+              fallbackChain: [],
+              error: 'Sıra ihlali: "My Leave" tıklanmadan önce "Leave" adımı tamamlanmalı'
+            };
+          }
+        }
+
+        if (
+          isFeatureEnabled('loopDetection', version) &&
+          decision.action === 'scroll' &&
+          history.slice(-5).filter((h) => h.action === 'scroll').length >= 2
+        ) {
+          console.log('   ⛔ Ardışık scroll engellendi (dropdown seçeneğine tıkla)');
+          actionResult = {
+            success: false,
+            strategyUsed: null,
+            fallbackChain: [],
+            error: 'Gereksiz scroll döngüsü — açık listedeki dropdown-option öğesine tıkla'
+          };
+        }
+
+        const preActionUrl = page.url();
+        if (!actionResult) {
+          try {
+            actionResult = await this._executeAction(page, decision, version, userPrompt);
+          } catch (err) {
+            actionResult = { success: false, error: err.message, fallbackChain: [] };
+          }
+        }
+
+        // Metrikleri topla
+        if (actionResult.strategyUsed) {
+          metrics.strategyUsageCounts[actionResult.strategyUsed] =
+            (metrics.strategyUsageCounts[actionResult.strategyUsed] || 0) + 1;
+          if (actionResult.strategyUsed.includes('bbox')) metrics.bboxFallbacks++;
+        }
+        if (actionResult.fallbackChain && actionResult.fallbackChain.length > 1) {
+          metrics.retryCount += actionResult.fallbackChain.length - 1;
+        }
+
+        // Aksiyon sonrası bekle
+        if (actionResult.success) {
+          if (
+            (decision.element?.type === 'custom-dropdown' && decision.action === 'click') ||
+            (decision.element?.type === 'dropdown-option' && decision.action === 'click')
+          ) {
+            await page.waitForTimeout(POST_DROPDOWN_WAIT);
+          } else if (['click', 'press', 'select', 'navigate'].includes(decision.action)) {
+            await page.waitForTimeout(POST_ACTION_WAIT);
+            await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+          }
+        }
+
+        if (actionResult.success && this._isNavigationLikeClick(decision)) {
+          const navCheck = await this._validateNavigationResult(
+            page,
+            preActionUrl,
+            page.url(),
+            decision.element
+          );
+          if (!navCheck.ok) {
+            actionResult = {
+              success: false,
+              strategyUsed: actionResult.strategyUsed,
+              fallbackChain: actionResult.fallbackChain || [],
+              error: navCheck.reason
+            };
+          } else if (navCheck.hint) {
+            actionResult.postActionHint = navCheck.hint;
+          }
+        }
+
+        if (
+          actionResult.success &&
+          decision.action === 'click' &&
+          isFormActionElement(decision.element)
+        ) {
+          const submitHint = await this._detectSubmitFeedback(page, decision.element);
+          if (submitHint) actionResult.postActionHint = submitHint;
+        }
+
+        if (actionResult.success && decision.action === 'click') {
+          const targetText = String(decision.element?.text || '').toLowerCase();
+          if (targetText.includes('leave') && !targetText.includes('my leave')) {
+            leaveNavDone = true;
+          }
+        }
+
+        const target = decision.element ? this._fingerprintToTarget(decision.element) : (decision.target || decision.value || null);
+        let errorMsg = null;
+        if (!actionResult.success) errorMsg = actionResult.error;
+        else if (actionResult.warning) errorMsg = `⚠️ ${actionResult.warning}`;
+        else if (confEval.manual) errorMsg = `⚠️ ${confEval.message}`;
+
+        let stepScreenshot = cleanShot;
+        try {
+          stepScreenshot = await page.screenshot({ fullPage: false });
+        } catch {
+          stepScreenshot = cleanShot;
+        }
+
+        await this._saveStep({
+          testRunId, stepNumber, action: decision.action,
+          target, value: decision.value,
+          aiReasoning: this._buildReasoning(decision, actionResult, confEval, version),
+          aiConfidence: decision.confidence,
+          success: actionResult.success, errorMsg,
+          durationMs: Date.now() - stepStartTime,
+          screenshotBuffer: stepScreenshot
+        });
+
+        history.push({
+          stepNumber,
+          action: decision.action,
+          elementId: decision.elementId,
+          target: decision.target,
+          value: decision.value,
+          success: actionResult.success,
+          strategy: actionResult.strategyUsed,
+          errorReason: actionResult.success ? null : (actionResult.error || 'unknown').substring(0, 200)
+        });
 
         if (!actionResult.success) {
-          console.log('   ⚠️ Adım başarısız — test devam ediyor');
+          console.log(`   ❌ ${actionResult.error?.substring(0, 100)}`);
+        } else {
+          console.log(`   ✓ Strateji: ${actionResult.strategyUsed}`);
         }
 
-        let resultScreenshotPath = preArtifacts.cleanPath;
-        if (actionResult.success && resolvedDecision.action !== 'verify' && resolvedDecision.action !== 'wait') {
-          try {
-            await this._sleep(CONFIG.postActionDelay);
-            resultScreenshotPath = await this._takeScreenshot(stepCount);
-          } catch {}
-        }
-
-        const savedStep = await this._saveStep(resolvedDecision, actionResult, resultScreenshotPath, stepCount);
-        this.steps.push(savedStep);
-
-        // "testComplete" ancak bu adım gerçekten başarılıysa kabul edilir.
-        testComplete = resolvedDecision.testComplete === true && actionResult.success;
-        if (testComplete) {
-          console.log(bugDetected ? '🐛 Test bitti — bug bulundu' : '✅ Test başarıyla tamamlandı');
-        }
-
-        await this._sleep(CONFIG.stepDelayMs);
+        await page.waitForTimeout(STEP_DELAY_MS);
       }
 
-      if (stepCount >= CONFIG.maxSteps && !testComplete) {
-        console.log(`⚠️ Maksimum adım (${CONFIG.maxSteps})`);
+      const maxStepsReached = stepNumber >= MAX_STEPS && !testCompleted;
+      if (!testCompleted) {
+        testSuccess = false;
+        failureSummary = this._buildIncompleteSummary({
+          maxStepsReached,
+          lastError,
+          failedCount: history.filter(h => !h.success).length,
+          history
+        });
+      } else if (!testSuccess && !failureSummary) {
+        failureSummary = this._buildFailedStepsSummary(history);
       }
-
-      try {
-        await this._sleep(500);
-        const finalPath = await this._takeScreenshot('final');
-        const finalStats = await fs.stat(finalPath);
-        await prisma.screenshot.create({ data: { filePath: finalPath, fileSize: finalStats.size, format: 'png' } });
-      } catch {}
 
       const duration = Date.now() - startTime;
-      const failedSteps = this.steps.filter((s) => !s.success).length;
-      const successSteps = this.steps.filter((s) => s.success).length;
-      console.log(`\n🏁 ${(duration / 1000).toFixed(1)}s | ${stepCount} adım | ✓${successSteps} ✗${failedSteps}`);
+      const successSteps = history.filter(h => h.success).length;
+      const failedSteps = history.filter(h => !h.success).length;
+
+      if (testSuccess) {
+        console.log(`\n📊 SONUÇ: BAŞARILI (${successSteps} başarılı adım)`);
+      } else {
+        console.log(`\n📊 SONUÇ: BAŞARISIZ — ${failureSummary || lastError || 'Bilinmeyen hata'}`);
+      }
 
       return {
-        success: testComplete && !bugDetected && !manualReviewReason && failedSteps === 0,
-        bugDetected,
-        bugDescription,
-        manualReview: !!manualReviewReason,
+        success: testSuccess,
+        bugDetected, bugDescription,
+        failureSummary: testSuccess ? null : (failureSummary || lastError),
+        manualReview,
         manualReviewReason,
-        totalSteps: stepCount,
-        failedSteps,
-        successSteps,
+        totalSteps: stepNumber, successSteps, failedSteps,
         duration,
+        error: testSuccess ? null : (failureSummary || lastError),
+        maxStepsReached,
+        architectureVersion: version.name,
+        metrics: {
+          ...metrics,
+          avgConfidence: metrics.confidenceScores.length > 0
+            ? metrics.confidenceScores.reduce((a, b) => a + b, 0) / metrics.confidenceScores.length
+            : 0,
+          avgStepDurationMs: stepNumber > 0 ? Math.round(duration / stepNumber) : 0
+        }
       };
-    } catch (error) {
-      console.error(`❌ Kritik: ${error.message}`);
+    } catch (err) {
+      console.error('Browser agent fatal:', err);
+      const fatalSummary = `Sistem hatası: ${err.message}`;
+      console.log(`\n📊 SONUÇ: BAŞARISIZ — ${fatalSummary}`);
       return {
-        success: false,
-        bugDetected: false,
-        bugDescription: null,
-        totalSteps: this.steps.length,
-        failedSteps: this.steps.filter((s) => !s.success).length,
-        successSteps: this.steps.filter((s) => s.success).length,
-        duration: Date.now() - startTime,
-        error: error.message,
+        success: false, bugDetected, bugDescription,
+        failureSummary: fatalSummary,
+        manualReview, manualReviewReason,
+        totalSteps: stepNumber, successSteps: 0, failedSteps: stepNumber,
+        duration: Date.now() - startTime, error: fatalSummary,
+        architectureVersion: version.name, metrics
       };
     } finally {
-      await this._closeBrowser();
+      await browser.close().catch(() => {});
     }
   }
 
-  async _initBrowser() {
-    this.browser = await chromium.launch({ headless: CONFIG.headless, slowMo: CONFIG.slowMo, args: ['--start-maximized'] });
-    this.context = await this.browser.newContext({ viewport: null });
-    this.page = await this.context.newPage();
-    this.page.setDefaultTimeout(CONFIG.actionTimeout);
-    await this.page.bringToFront();
-    console.log('✅ Tarayıcı başlatıldı');
-  }
+  /**
+   * Aksiyonu uygula — V4'te self-healing, diğerlerinde simple
+   */
+  async _executeAction(page, decision, version, userPrompt = '') {
+    const { action, element, value, target } = decision;
 
-  async _captureStepArtifacts(stepLabel) {
-    const cleanPath = await this._takeScreenshot(stepLabel);
-    const elements = await this._extractInteractiveElements();
-    const annotatedPath = await this._annotateScreenshot(cleanPath, elements, stepLabel);
-    return { cleanPath, annotatedPath, elements };
-  }
-
-  async _extractInteractiveElements() {
-    const raw = await this.page.evaluate((maxElements) => {
-      const selector = 'input:not([type="hidden"]), textarea, select, button, a[href], [role="button"], [role="link"], [role="combobox"], [role="listbox"], [role="menuitem"]';
-      const nodes = Array.from(document.querySelectorAll(selector));
-      const isVisible = (el) => {
-        const style = window.getComputedStyle(el);
-        if (style.visibility === 'hidden' || style.display === 'none') return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 5 && r.height > 5 && r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
-      };
-      const getText = (el) => (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
-      const out = [];
-      for (const el of nodes) {
-        if (!isVisible(el)) continue;
-        const rect = el.getBoundingClientRect();
-        const attrs = {
-          tag: el.tagName.toLowerCase(),
-          id: el.id || '',
-          name: el.getAttribute('name') || '',
-          placeholder: el.getAttribute('placeholder') || '',
-          testId: el.getAttribute('data-testid') || '',
-          ariaLabel: el.getAttribute('aria-label') || '',
-          role: el.getAttribute('role') || '',
-          text: getText(el),
-          label: (el.labels && el.labels[0] ? (el.labels[0].innerText || '').trim() : ''),
-        };
-        const options = attrs.tag === 'select'
-          ? Array.from(el.options).slice(0, 20).map((o) => ({ value: o.value, text: (o.text || '').trim().slice(0, 60) }))
-          : null;
-        out.push({
-          attrs,
-          bbox: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-          options,
-        });
-        if (out.length >= maxElements) break;
+    if (
+      element &&
+      (action === 'fill' || action === 'type') &&
+      (element.type === 'date-input' || /yyyy|dd|mm|date/i.test(element.fingerprint?.placeholder || ''))
+    ) {
+      const raw = value ?? decision.value;
+      if (raw != null && raw !== '') {
+        decision.value = normalizeDateForElement(String(raw), element, userPrompt);
       }
-      return out;
-    }, CONFIG.maxInteractiveElements);
-    return raw.map((item, idx) => this._decorateElement(idx + 1, item));
-  }
+    }
 
-  _decorateElement(elementId, item) {
-    const { attrs, bbox, options } = item;
-    const escaped = (v) => String(v || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const roleTextSelector = attrs.role && attrs.text ? `[role="${escaped(attrs.role)}"]:has-text("${escaped(attrs.text.slice(0, 50))}")` : null;
-    const selectors = [
-      attrs.id ? `#${escaped(attrs.id)}` : null,
-      attrs.testId ? `[data-testid="${escaped(attrs.testId)}"]` : null,
-      attrs.name ? `${attrs.tag}[name="${escaped(attrs.name)}"]` : null,
-      attrs.placeholder ? `${attrs.tag}[placeholder="${escaped(attrs.placeholder)}"]` : null,
-      attrs.ariaLabel ? `${attrs.tag}[aria-label="${escaped(attrs.ariaLabel)}"]` : null,
-      roleTextSelector,
-    ].filter(Boolean);
-    return {
-      elementId,
-      tag: attrs.tag,
-      text: attrs.text,
-      label: attrs.label,
-      testId: attrs.testId || null,
-      css: selectors[0] || null,
-      xpath: attrs.id ? `//*[@id="${attrs.id}"]` : attrs.name ? `//${attrs.tag}[@name="${attrs.name}"]` : `//${attrs.tag}`,
-      nameSelector: attrs.name ? `${attrs.tag}[name="${escaped(attrs.name)}"]` : null,
-      roleTextSelector,
-      selectors,
-      bbox,
-      options,
-    };
-  }
-
-  _buildPageContext(elements) {
-    return elements.map((el) => {
-      const opts = el.options?.length ? ` options=[${el.options.slice(0, 6).map((o) => `${o.text}:${o.value}`).join(', ')}]` : '';
-      return `#${el.elementId} ${el.tag} label="${el.label || ''}" text="${(el.text || '').slice(0, 80)}" css="${el.css || ''}" bbox=${el.bbox.x},${el.bbox.y},${el.bbox.width},${el.bbox.height}${opts}`;
-    }).join('\n');
-  }
-
-  _labelForElement(el) {
-    return [el.label, el.text, el.tag].find((v) => v && String(v).trim()) || `element-${el.elementId}`;
-  }
-
-  async _annotateScreenshot(cleanPath, elements, stepLabel) {
-    const label = String(stepLabel).padStart(3, '0');
-    const annotatedPath = path.join(CONFIG.screenshotDir, `run_${this.testRunId}_step_${label}_annotated.png`);
-    const image = sharp(cleanPath);
-    const meta = await image.metadata();
-    const width = meta.width || 1280;
-    const height = meta.height || 720;
-    const boxes = elements.map((el) => {
-      const x = Math.max(0, Math.min(width - 1, el.bbox.x));
-      const y = Math.max(0, Math.min(height - 1, el.bbox.y));
-      const w = Math.max(1, Math.min(width - x, el.bbox.width));
-      const h = Math.max(1, Math.min(height - y, el.bbox.height));
-      return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="#22c55e" stroke-width="2"/>
-<rect x="${x}" y="${Math.max(0, y - 20)}" width="${24 + String(el.elementId).length * 8}" height="18" fill="#2563eb"/>
-<text x="${x + 6}" y="${Math.max(12, y - 7)}" font-size="12" fill="#ffffff" font-family="Arial" font-weight="700">${el.elementId}</text>`;
-    }).join('');
-    const svg = Buffer.from(`<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${boxes}</svg>`);
-    await image.composite([{ input: svg, top: 0, left: 0 }]).png().toFile(annotatedPath);
-    return annotatedPath;
-  }
-
-  async _takeScreenshot(stepLabel) {
-    const label = String(stepLabel).padStart(3, '0');
-    const screenshotPath = path.join(CONFIG.screenshotDir, `run_${this.testRunId}_step_${label}.png`);
-    await this.page.screenshot({ path: screenshotPath, fullPage: false });
-    return screenshotPath;
-  }
-
-  _validateDecision(decision) {
-    if (!decision || typeof decision !== 'object') return false;
-    const valid = ['navigate', 'click', 'fill', 'select', 'type', 'press', 'wait', 'scroll', 'hover', 'verify'];
-    if (!valid.includes(decision.action)) return false;
-    if (['click', 'fill', 'select', 'type', 'hover'].includes(decision.action) && !decision.target && !decision.elementId) return false;
-    if (['fill', 'type'].includes(decision.action) && decision.value == null) return false;
-    if (typeof decision.confidence !== 'number') decision.confidence = 0.5;
-    return true;
-  }
-
-  _resolveDecisionWithElement(decision, elements) {
-    if (!decision.elementId) return decision;
-    const matched = elements.find((el) => el.elementId === decision.elementId);
-    if (!matched) return decision;
-    const fallbackSelectors = [...new Set([...(matched.selectors || []), matched.xpath, ...(decision.alternativeSelectors || [])].filter(Boolean))];
-    return { ...decision, target: decision.target || fallbackSelectors[0] || null, resolvedElement: matched, alternativeSelectors: fallbackSelectors };
-  }
-
-  _isSelectorAction(action) {
-    return ['click', 'fill', 'select', 'type', 'hover'].includes(action);
-  }
-
-  /** Düşük güvende işlevsiz kesilmesin: scroll/wait/verify/hover/navigate/press serbest — belirsellik sırasında bunlar sık */
-  _requiresConfidenceGate(action) {
-    return ['click', 'fill', 'select', 'type'].includes(action);
-  }
-
-  /** window + PageDown + en büyük scrollable konteyner (SPA ürün listeleri için) */
-  async _scrollViewport(value) {
-    const parsed = parseInt(String(value ?? '').trim(), 10);
-    const px = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 2000) : 520;
-    await this.page.evaluate((y) => window.scrollBy(0, y), px).catch(() => {});
-    await this.page.keyboard.press('PageDown').catch(() => {});
-    await this.page.evaluate((y) => {
-      let best = null;
-      let score = -1;
-      const walk = document.querySelectorAll('*');
-      for (let i = 0; i < walk.length; i++) {
-        const el = walk[i];
-        const st = window.getComputedStyle(el);
-        if (st.overflowY !== 'auto' && st.overflowY !== 'scroll') continue;
-        if (el.scrollHeight <= el.clientHeight + 4) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 120 || rect.height < 160) continue;
-        const overlap = rect.height * rect.width;
-        if (overlap > score) {
-          score = overlap;
-          best = el;
+    // Element bağımsız aksiyonlar
+    if (action === 'navigate' && value) {
+      await page.goto(value, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      return { success: true, strategyUsed: 'navigate', fallbackChain: [] };
+    }
+    if (action === 'wait') {
+      await page.waitForTimeout(parseInt(value) || 1000);
+      return { success: true, strategyUsed: 'wait', fallbackChain: [] };
+    }
+    if (action === 'scroll') {
+      const dir = (value || 'down').toLowerCase();
+      if (dir === 'down' || dir === 'up') {
+        const delta = dir === 'down' ? 120 : -120;
+        for (let i = 0; i < 6; i++) {
+          await page.mouse.wheel(0, delta);
+          await page.waitForTimeout(90);
         }
+      } else if (dir === 'top') {
+        await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+      } else if (dir === 'bottom') {
+        await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
       }
-      if (best) best.scrollBy(0, y);
-    }, px).catch(() => {});
-    await this._sleep(160);
-  }
-
-  async _executeAction(decision) {
-    const startTime = Date.now();
-    try {
-      await this._executeByDecision(decision, decision.target);
-      return { success: true, duration: Date.now() - startTime };
-    } catch (error) {
-      if (decision.alternativeSelectors?.length) {
-        const fallback = await this._tryAlternatives(decision, startTime);
-        if (fallback.success) return fallback;
-      }
-      if (decision.resolvedElement && decision.action === 'click') {
-        const clickFallback = await this._clickByBoundingBox(decision.resolvedElement, startTime);
-        if (clickFallback.success) return clickFallback;
-      }
-      return { success: false, duration: Date.now() - startTime, error: error.message };
+      await page.waitForTimeout(POST_SCROLL_WAIT);
+      return { success: true, strategyUsed: 'scroll', fallbackChain: [] };
     }
-  }
-
-  async _executeByDecision(decision, selector) {
-    switch (decision.action) {
-      case 'navigate':
-        await this.page.goto(decision.target, { waitUntil: 'domcontentloaded', timeout: CONFIG.navigationTimeout });
-        break;
-      case 'click':
-        await this._safeAction(selector, (l) => l.click());
-        break;
-      case 'fill':
-        await this._safeAction(selector, (l) => l.fill(decision.value || ''));
-        break;
-      case 'select':
-        await this._safeAction(selector, async (l) => {
-          const raw = String(decision.value ?? '').trim();
-          try { await l.selectOption({ label: raw }); } catch { try { await l.selectOption(raw); } catch { await l.selectOption({ value: raw }); } }
-        });
-        break;
-      case 'type':
-        await this._safeAction(selector, (l) => l.pressSequentially(decision.value || '', { delay: 30 }));
-        break;
-      case 'press':
-        await this.page.keyboard.press(decision.value || decision.target);
-        break;
-      case 'wait':
-        await this._sleep(Math.min(parseInt(decision.value, 10) || 1500, 5000));
-        break;
-      case 'scroll':
-        await this._scrollViewport(decision.value);
-        break;
-      case 'hover':
-        await this._safeAction(selector, (l) => l.hover());
-        break;
-      default:
-        break;
+    if (action === 'verify') {
+      return { success: true, strategyUsed: 'verify', fallbackChain: [] };
     }
-  }
+    if (action === 'press' && !element && !target) {
+      await page.keyboard.press(value || 'Enter');
+      return { success: true, strategyUsed: 'keyboard', fallbackChain: [] };
+    }
 
-  async _selfHealAction(decision, actionResult, userPrompt) {
-    let latestResult = actionResult;
-    for (let i = 0; i < CONFIG.selfHealingRetries; i++) {
-      const retryArtifacts = await this._captureStepArtifacts(`heal_${Date.now()}_${i}`);
+    // ════════════════════════════════════════════════════════════════
+    // ELEMENT BAZLI AKSİYONLAR — BURASI VERSİYONA GÖRE DALLANIR
+    // ════════════════════════════════════════════════════════════════
+
+    // V2/V3/V4: element nesnesi var (DOM extraction'dan)
+    if (element) {
+      if (isFeatureEnabled('selfHealing', version)) {
+        console.log(`   ⚙️  [V4] executeWithHealing kullanılıyor`);
+        return await executeWithHealing(page, element, action, value, version.features);
+      }
+      console.log(`   ⚙️  [V${isFeatureEnabled('somAnnotation', version) ? '3' : '2'}] executeSimple kullanılıyor (fallback yok)`);
+      return await executeSimple(page, element, action, value);
+    }
+
+    // V1: AI doğrudan selector verdi (target field)
+    if (target) {
+      console.log(`   ⚙️  [V1] Doğrudan selector kullanılıyor: ${target}`);
       try {
-        const retryDecisionRaw = await aiService.analyzeScreenshot(
-          retryArtifacts.annotatedPath,
-          userPrompt,
-          [...this.steps, { ...decision, success: false, errorMsg: latestResult.error }],
-          this._buildPageContext(retryArtifacts.elements),
-          retryArtifacts.elements.map((el) => ({
-            elementId: el.elementId,
-            label: this._labelForElement(el),
-            selectorHints: [el.css, el.testId, el.nameSelector, el.roleTextSelector].filter(Boolean),
-          }))
-        );
-        const retryDecision = this._resolveDecisionWithElement(retryDecisionRaw, retryArtifacts.elements);
-        if (!this._validateDecision(retryDecision)) continue;
-        latestResult = await this._executeAction(retryDecision);
-        if (latestResult.success) return latestResult;
-      } catch (e) {
-        latestResult = { success: false, duration: 0, error: e.message };
-      }
-      if (decision.resolvedElement && decision.action === 'click') {
-        const bbResult = await this._clickByBoundingBox(decision.resolvedElement, Date.now());
-        if (bbResult.success) return bbResult;
+        const locator = page.locator(target).first();
+        await locator.waitFor({ state: 'visible', timeout: 3000 });
+
+        switch (action) {
+          case 'click': await locator.click({ timeout: 8000 }); break;
+          case 'fill': await locator.fill(value || '', { timeout: 8000 }); break;
+          case 'type':
+            await locator.click();
+            await locator.type(value || '', { delay: 50 });
+            break;
+          case 'select': await locator.selectOption(value, { timeout: 5000 }); break;
+          case 'press': await locator.press(value || 'Enter'); break;
+          case 'hover': await locator.hover(); break;
+          default: throw new Error(`Bilinmeyen aksiyon: ${action}`);
+        }
+        return { success: true, strategyUsed: 'direct-selector', fallbackChain: [{ strategy: 'direct-selector', status: 'success' }] };
+      } catch (err) {
+        return {
+          success: false,
+          error: err.message,
+          fallbackChain: [{ strategy: 'direct-selector', status: 'failed', error: err.message.substring(0, 150) }]
+        };
       }
     }
-    return latestResult;
+
+    return { success: false, error: 'Ne element ne target verildi', fallbackChain: [] };
   }
 
-  async _safeAction(selector, actionFn) {
-    if (!selector) throw new Error('Selector boş');
-    const locator = this.page.locator(selector).first();
-    await locator.waitFor({ state: 'visible', timeout: CONFIG.actionTimeout });
-    await locator.scrollIntoViewIfNeeded();
-    await actionFn(locator);
+  _fingerprintToTarget(element) {
+    const fp = element.fingerprint;
+    return fp.dataTest || fp.id || fp.cssSelector || fp.text || `bbox(${element.bbox.x},${element.bbox.y})`;
   }
 
-  async _tryAlternatives(decision, startTime) {
-    for (const alt of decision.alternativeSelectors) {
+  _isNavigationLikeClick(decision) {
+    if (decision.action !== 'click' || !decision.element) return false;
+    if (isInPageActionElement(decision.element)) return false;
+    if (['link', 'menuitem', 'tab'].includes(decision.element.type)) return true;
+    return isNavigationElement(decision.element);
+  }
+
+  _routeKeywordFromText(text) {
+    const normalized = String(text || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ');
+    const tokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+    if (tokens.length > 0) return tokens[0];
+    const short = normalized.trim();
+    if (short.length >= 4) return short;
+    return null;
+  }
+
+  _urlPathAndHash(url) {
+    try {
+      const u = new URL(url);
+      return { path: u.pathname.toLowerCase(), hash: u.hash.toLowerCase(), full: url.toLowerCase() };
+    } catch {
+      return { path: '', hash: '', full: String(url || '').toLowerCase() };
+    }
+  }
+
+  /**
+   * AI "complete" dese bile: önceki adımlarda hata varsa success=false.
+   */
+  _resolveCompletionOutcome(history, decision, userPrompt) {
+    const failed = history.filter(h => !h.success);
+    const aiClaimsSuccess = decision.success !== false;
+
+    if (!aiClaimsSuccess) {
+      const reason = (decision.reasoning || 'AI testi başarısız olarak işaretledi.').substring(0, 280);
+      return { success: false, failureSummary: reason };
+    }
+
+    if (failed.length > 0) {
+      return {
+        success: false,
+        failureSummary: this._buildFailedStepsSummary(history, {
+          prefix: 'Prompt tamamlanamadı: AI erken bitti.'
+        })
+      };
+    }
+
+    const compliance = checkPromptCompliance(userPrompt, history);
+    if (!compliance.ok) {
+      console.log(`   ⛔ Prompt uyumu: ${compliance.message}`);
+      return { success: false, failureSummary: compliance.message };
+    }
+
+    return { success: true, failureSummary: null };
+  }
+
+  _buildFailedStepsSummary(history, opts = {}) {
+    const failed = history.filter(h => !h.success);
+    if (failed.length === 0) return opts.prefix || 'Bilinmeyen başarısızlık';
+
+    const last = failed[failed.length - 1];
+    const targetPart = last.target ? ` hedef="${String(last.target).substring(0, 60)}"` : '';
+    const errPart = (last.errorReason || 'hata detayı yok').substring(0, 120);
+    const core = `${failed.length} adım başarısız. Son: ${last.action}${targetPart} — ${errPart}`;
+    return opts.prefix ? `${opts.prefix} ${core}`.substring(0, 400) : core.substring(0, 400);
+  }
+
+  _buildIncompleteSummary({ maxStepsReached, lastError, failedCount, history }) {
+    if (lastError) return lastError.substring(0, 400);
+    if (maxStepsReached) {
+      const failHint = failedCount > 0
+        ? ` ${failedCount} adım hata verdi.`
+        : '';
+      return `Test ${MAX_STEPS} adımda tamamlanamadı; prompt bitmedi.${failHint}`.substring(0, 400);
+    }
+    if (failedCount > 0) return this._buildFailedStepsSummary(history);
+    return 'Test beklenmedik şekilde sonlandı.';
+  }
+
+  async _validateNavigationResult(page, beforeUrl, afterUrl, element) {
+    const before = this._urlPathAndHash(beforeUrl);
+    const after = this._urlPathAndHash(afterUrl);
+    const text = String(element?.text || '').toLowerCase();
+    const href = element?.attrs?.href || element?.fingerprint?.href || '';
+
+    const changed = after.path !== before.path || after.hash !== before.hash || after.full !== before.full;
+    if (!changed) {
+      const spaOk = await this._validateSpaContentChange(page, element);
+      if (spaOk.ok) return spaOk;
+      return { ok: false, reason: 'Navigasyon doğrulanamadı: URL değişmedi' };
+    }
+
+    if (href) {
       try {
-        await this._executeByDecision(decision, alt);
-        return { success: true, duration: Date.now() - startTime };
-      } catch {}
+        const hrefPath = new URL(href, beforeUrl || afterUrl).pathname.toLowerCase();
+        const segment = hrefPath.split('/').filter(Boolean).pop();
+        if (segment && segment.length > 2 && (after.path.includes(segment) || after.full.includes(segment))) {
+          return { ok: true };
+        }
+      } catch { /* ignore */ }
     }
-    return { success: false, duration: Date.now() - startTime, error: 'Tüm selectorlar başarısız' };
+
+    if (text.includes('contact') || text.includes('iletişim') || text.includes('iletisim')) {
+      if (after.path.includes('contact') || after.path.includes('iletisim') || after.full.includes('contact')) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason: `Navigasyon şüpheli: contact/iletişim sayfasına gidilmedi (${afterUrl})`
+      };
+    }
+
+    const expectedKeyword = this._routeKeywordFromText(element?.text);
+    if (expectedKeyword && !after.path.includes(expectedKeyword) && !after.full.includes(expectedKeyword)) {
+      return {
+        ok: false,
+        reason: `Navigasyon şüpheli: URL değişti ama "${expectedKeyword}" içermiyor (${afterUrl})`
+      };
+    }
+
+    return { ok: true };
   }
 
-  async _clickByBoundingBox(element, startTime) {
+  /** Menü dışı SPA: URL aynı kalır ama adım/form değişir */
+  async _validateSpaContentChange(page, element) {
     try {
-      const centerX = element.bbox.x + Math.floor(element.bbox.width / 2);
-      const centerY = element.bbox.y + Math.floor(element.bbox.height / 2);
-      await this.page.mouse.click(centerX, centerY);
-      return { success: true, duration: Date.now() - startTime };
-    } catch (e) {
-      return { success: false, duration: Date.now() - startTime, error: e.message };
-    }
+      const body = (await page.locator('body').innerText({ timeout: 3000 })).toLowerCase();
+      const stepHints =
+        /enter your information|confirm|your name|e-?mail|subject|thank you|teşekkür|başarı|gönderildi|received|thank you for your order|checkout complete|add to cart|remove|shopping cart/i;
+      if (stepHints.test(body)) {
+        return { ok: true, hint: 'SPA: sayfa içeriği güncellendi (form/sepet/checkout)' };
+      }
+
+      const dt = String(element?.fingerprint?.dataTest || '').toLowerCase();
+      if (/add-to-cart|remove|shopping[-_]?cart|checkout/.test(dt)) {
+        return { ok: true, hint: 'SPA: sepet/ürün aksiyonu (URL değişmeyebilir)' };
+      }
+    } catch { /* ignore */ }
+    return { ok: false };
   }
 
-  async _saveStep(decision, actionResult, screenshotPath, stepNumber) {
-    let screenshotId = null;
+  async _detectSubmitFeedback(page, element) {
+    const label = String(element?.text || '').toLowerCase();
+    if (!/\b(submit|gönder|send)\b/i.test(label)) return null;
     try {
-      const stats = await fs.stat(screenshotPath);
-      const ss = await prisma.screenshot.create({ data: { filePath: screenshotPath, fileSize: stats.size, format: 'png' } });
-      screenshotId = ss.id;
-    } catch (err) {
-      console.error(`   📸 DB: ${err.message}`);
-    }
-
-    try {
-      return await prisma.testStep.create({
-        data: {
-          testRunId: this.testRunId,
-          stepNumber,
-          timestamp: new Date(),
-          action: decision.action,
-          target: decision.target || (decision.elementId ? `elementId:${decision.elementId}` : null),
-          value: decision.value || null,
-          screenshotId,
-          aiReasoning: decision.reasoning || '',
-          aiConfidence: decision.confidence,
-          success: actionResult.success,
-          errorMsg: actionResult.error || null,
-          durationMs: actionResult.duration,
-        },
-      });
-    } catch (err) {
-      console.error(`   💾 DB: ${err.message}`);
-      return { action: decision.action, target: decision.target, success: actionResult.success, value: decision.value };
-    }
+      await page.waitForTimeout(800);
+      const body = (await page.locator('body').innerText({ timeout: 3000 })).toLowerCase();
+      if (/thank you|teşekkür|successfully|başarıyla|received|gönderildi|mesajınız|alındı/i.test(body)) {
+        return 'Gönderim onayı: sayfada başarı/teşekkür metni görüldü';
+      }
+    } catch { /* ignore */ }
+    return 'Submit tıklandı; e-postanın gerçekten iletilip iletilmediği sunucu/API loglarından doğrulanmalı';
   }
 
-  async _closeBrowser() {
-    try {
-      if (this.context) { await this.context.close(); this.context = null; }
-      if (this.browser) { await this.browser.close(); this.browser = null; }
-      this.page = null;
-    } catch (err) {
-      console.error(`Kapatma: ${err.message}`);
+  _buildReasoning(decision, actionResult, confEval, version) {
+    const parts = [`[${version.name}]`, decision.reasoning];
+    if (actionResult.strategyUsed && !['wait', 'scroll'].includes(actionResult.strategyUsed)) {
+      parts.push(`[Strateji: ${actionResult.strategyUsed}]`);
     }
+    if (actionResult.fallbackChain && actionResult.fallbackChain.length > 1) {
+      const failed = actionResult.fallbackChain.filter(f => f.status === 'failed').length;
+      if (failed > 0) parts.push(`[${failed} fallback]`);
+    }
+    if (confEval.manual) parts.push(`[⚠ Düşük güven]`);
+    if (actionResult.warning) parts.push(`[⚠ ${actionResult.warning}]`);
+    if (actionResult.postActionHint) parts.push(`[${actionResult.postActionHint}]`);
+    return parts.join(' ').substring(0, 500);
   }
 
-  _sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  _estimateTokens(elements, history) {
+    const imageTokens = 1600;
+    const systemPromptTokens = 1500;
+    const elementTokens = elements.length * 30;
+    const historyTokens = history.length * 40;
+    return imageTokens + systemPromptTokens + elementTokens + historyTokens;
+  }
+
+  async _saveStep({ testRunId, stepNumber, action, target, value, aiReasoning, aiConfidence, success, errorMsg, durationMs, screenshotBuffer }) {
+    const filename = `run-${testRunId}-step-${stepNumber}-${Date.now()}.png`;
+    const filePath = path.join(SCREENSHOTS_DIR, filename);
+    await fs.writeFile(filePath, screenshotBuffer);
+
+    const screenshot = await prisma.screenshot.create({
+      data: { filePath, fileSize: screenshotBuffer.length, format: 'png' }
+    });
+
+    await prisma.testStep.create({
+      data: {
+        testRunId, stepNumber, timestamp: new Date(),
+        action,
+        target: target ? String(target).substring(0, 500) : null,
+        value: value ? String(value).substring(0, 500) : null,
+        aiReasoning: aiReasoning ? aiReasoning.substring(0, 500) : null,
+        aiConfidence, success,
+        errorMsg: errorMsg ? errorMsg.substring(0, 500) : null,
+        durationMs, screenshotId: screenshot.id
+      }
+    });
   }
 }
 
