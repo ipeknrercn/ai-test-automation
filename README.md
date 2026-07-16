@@ -1,4 +1,4 @@
-# AI-Powered Test Automation Tool
+ # AI-Powered Test Automation Tool
 
 ## TR
 > Doğal dil komutlarıyla çalışan, yapay zeka destekli otomatik test otomasyon aracı.
@@ -7,9 +7,9 @@
 
 ## Proje Hakkında
 
-Bu proje, yazılım test süreçlerini yapay zeka ile otomatikleştirmek amacıyla geliştirilmektedir. Geleneksel test otomasyon araçlarının aksine, kod yazmaya gerek kalmadan doğal dil kullanılan komutlarla web uygulamalarını test edebilmek temel hedefimizdir.
+Bu proje, yazılım test süreçlerini yapay zeka ile otomatikleştirmek amacıyla geliştirildi. Geleneksel test otomasyon araçlarının aksine, kod yazmaya gerek kalmadan doğal dil kullanılan komutlarla web uygulamalarını test edebilmek temel hedefimizdi.
 
-Proje, bir test mühendisinin karşılaştığı manuel test yükünü azaltma fikriyle doğmuştur. Yapay zeka, ekranda ne gördüğünü analiz eder, bir sonraki adımı kendi belirler ve her işlemi otomatik olarak kaydeder.
+Proje, bir test mühendisinin karşılaştığı manuel test yükünü azaltma fikriyle doğmuştur. Yapay zeka, test mühendisinin prompt olarak girdiği test caselerini analiz eder, ve agent kullanarak bu senaryoları gerçekleştirir. İşlemi otomatik olarak kaydeder ve test sonuçlarını raporlar.
 
 ---
 
@@ -30,13 +30,13 @@ Sistem bu komutu alır, adım adım tarayıcıyı kontrol eder, her adımda ekra
 
 Proje üç ana katmandan oluşmaktadır:
 
-**Frontend (Geliştirme aşamasında)**
-Kullanıcının test komutlarını girebileceği, geçmiş test sonuçlarını görebileceği ve istatistikleri takip edebileceği bir React arayüzü planlanmaktadır.
+**Frontend**
+Kullanıcının test komutlarını girebileceği, geçmiş test sonuçlarını görebileceği ve istatistikleri takip edebileceği bir React arayüzü.
 
-**Backend (Aktif geliştirme)**
+**Backend**
 Node.js ve Express.js ile yazılmış REST API. Test komutlarını alır, browser agent'ı çalıştırır, AI servisiyle iletişim kurar ve sonuçları veritabanına yazar.
 
-**Veritabanı (Tamamlandı)**
+**Veritabanı**
 PostgreSQL ve Prisma ORM kullanılmaktadır. Test geçmişi, adım detayları, ekran görüntüleri ve prompt versiyonları burada saklanır.
 
 ---
@@ -69,7 +69,7 @@ ai-test-automation/
 │   │
 │   └── .env                         # Ortam değişkenleri (API key, DB URL)
 │
-└── frontend/                        # (Geliştirme aşamasında - React)
+└── frontend/                        # (React)
 ```
 
 ---
@@ -143,18 +143,6 @@ Kullanıcı Komutu (Doğal Dil)
 
 ---
 
-
-## Veritabanı Yapısı
-
-Sistem dört ana tablo üzerinde çalışmaktadır:
-
-- **Test** — Test senaryolarının tanımları ve prompt metinleri
-- **TestRun** — Her test çalıştırmasının sonuçları (başarılı/başarısız, süre)
-- **TestStep** — Her adımın detayı (hangi eleman, hangi eylem, güven skoru)
-- **PromptVersion** — Prompt geçmişi ve başarı oranlarına göre versiyonlama
-
----
-
 ## Kurulum (Geliştirici)
 
 ```bash
@@ -193,6 +181,8 @@ npm start
 
 ---
 ---
+## 🎥 Demo Video: 
+https://youtu.be/QOY-nXrFLTk
 ---
 ---
 
@@ -204,37 +194,38 @@ npm start
 ---
 ## About the Project
 
-This project is being developed to automate software testing processes using artificial intelligence. Unlike traditional test automation tools, our primary goal is to enable testing of web applications using natural language commands without the need to write code.
-The project was born from the idea of reducing the manual testing load faced by a test engineer. Artificial intelligence analyzes what it sees on the screen, determines the next step itself, and automatically records each action.
+This project was developed with the aim of automating software testing processes using artificial intelligence. Unlike traditional test automation tools, our main goal was to be able to test web applications using natural language commands without the need to write code.
 
+The project was born from the idea of ​​reducing the manual testing burden faced by a test engineer. Artificial intelligence analyzes the test cases entered promptly by the test engineer and executes these scenarios using an agent. It automatically records the process and reports the test results.
 ---
 
 ## What Does It Do?
 
-The user writes a command like this to the system:
+The user types the following command into the system:
 
 ```
-"Go to the site, accept cookies, log in with username and password.
-If login is successful, open the cart, clear the cart if there are products, or add to favorites if there are none."
+"Enter the site, accept cookies, log in with username and password.
+If login is successful, open the cart, clear any existing items, or add them to favorites if none exist."
 ```
 
-The system receives this command, controls the browser step by step, takes a screenshot at each step, and the AI analyzes the image to determine the next action. The results are recorded in the database and reported.
+The system receives this command, checks the browser step by step, takes a screenshot at each step, and the artificial intelligence analyzes the image to determine the next action. The results are saved to the database and reported.
 
 ---
 ## Architecture
-The project consists of three main layers:
+The project consists of 3 main layers:
 
-**Frontend (Under development)**
-A React interface is planned where the user can enter test commands, view past test results, and track statistics.
+**Frontend**
+A React interface where the user can enter test commands, view past test results, and track statistics.
 
-**Backend (Active development)**
-A REST API written in Node.js and Express.js. It receives test commands, runs the browser agent, communicates with the AI service, and writes the results to the database.
+**Backend**
+A REST API written in Node.js and Express.js. It receives test commands, runs the browser agent, communicates with the AI ​​service, and writes the results to the database.
 
-**Database (Completed)**
+**Database**
 PostgreSQL and Prisma ORM are used. Test history, step details, screenshots, and prompt versions are stored here.
+
 ---
 
-## Proje Yapısı
+## Project Structure
 
 ```
 ai-test-automation/
@@ -262,7 +253,7 @@ ai-test-automation/
 │   │
 │   └── .env                         # Environment variables (API key, DB URL)
 │
-└── frontend/                        # (Under development - React)
+└── frontend/                        # (React)
 ```
 
 ---
@@ -331,15 +322,7 @@ User Command (Natural Language)
 ```
 ---
 
-## Database Structure
-The system operates on four main tables:
-- **Test** — Test scenario definitions and prompt texts
-- **TestRun** — Results of each test run (pass/fail, duration)
-- **TestStep** — Details of each step (which element, which action, confidence score)
-- **PromptVersion** — Prompt history and versioning based on success rates
----
-
-## Setup (Developer)
+## Setup 
 ```bash
 # Clone the repository
 git clone https://github.com/ipeknrercn/ai-test-automation.git
