@@ -12,7 +12,10 @@ Bu proje, yazılım test süreçlerini yapay zeka ile otomatikleştirmek amacıy
 Proje, bir test mühendisinin karşılaştığı manuel test yükünü azaltma fikriyle doğmuştur. Yapay zeka, test mühendisinin prompt olarak girdiği test caselerini analiz eder, ve agent kullanarak bu senaryoları gerçekleştirir. İşlemi otomatik olarak kaydeder ve test sonuçlarını raporlar.
 
 ---
-
+---
+## 🎥 Demo Video: 
+https://youtu.be/QOY-nXrFLTk
+---
 ## Ne Yapıyor?
 
 Kullanıcı sisteme şöyle bir komut yazar:
@@ -180,10 +183,7 @@ npm start
 
 
 ---
----
-## 🎥 Demo Video: 
-https://youtu.be/QOY-nXrFLTk
----
+
 ---
 
 
