@@ -86,7 +86,7 @@ ai-test-automation/
 | Yapay Zeka | Claude Sonnet (Vision) | Ekran analizi ve karar verme |
 | Veritabanı | PostgreSQL | Kalıcı veri saklama |
 | ORM | Prisma | Veritabanı ile güvenli iletişim |
-| Frontend | React (Planlanıyor) | Kullanıcı arayüzü |
+| Frontend | React | Kullanıcı arayüzü |
 
 ---
 
@@ -108,7 +108,7 @@ Claude Vision API bağlantısı kuruldu. Sistem artık ekran görüntüsünü ya
 Playwright ve yapay zekanın birlikte çalıştığı ana döngü tamamlandı. Her adımda: ekran görüntüsü çek → AI'ya gönder → karar al → eylemi gerçekleştir → veritabanına kaydet.
 
 ### Faz 4 — Frontend Geliştirme
-Her test çalıştırıldığında prompt performansı ölçülecek ve zaman içinde otomatik iyileştirme sağlanacak.
+Her test çalıştırıldığında prompt performansı ölçüldü ve otomatik iyileştirme sağlandı.
 
 ### Faz 5 — Prompt Versiyonlama
 React ile kullanıcı arayüzü, test geçmişi dashboard'u ve gerçek zamanlı test izleme ekranı.
@@ -266,7 +266,7 @@ ai-test-automation/
 | Artificial Intelligence | Claude Sonnet (Vision) | Screen analysis and decision making |
 | Database | PostgreSQL | Persistent data storage |
 | ORM | Prisma | Secure communication with the database |
-| Frontend | React (Planned) | User interface |
+| Frontend | React | User interface |
 ---
 
 ## Development Phases
@@ -287,7 +287,7 @@ The Claude Vision API connection has been established. The system can now send s
 The main loop where Playwright and AI work together is complete. Each step: take a screenshot → send to AI → make a decision → perform the action → save to the database.
 
 ### Phase 4 — Frontend Development
-Prompt performance will be measured each time a test is run, and automatic improvements will be made over time.
+Prompt performance measured each time a test is run, and automatic improvements are made.
 
 ### Phase 5 — Prompt Versioning 
 User interface, test history dashboard, and real-time test monitoring screen using React.
